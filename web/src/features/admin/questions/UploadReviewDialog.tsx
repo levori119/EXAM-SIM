@@ -11,7 +11,7 @@ import { compressImage } from '../../../ingest/images';
 import { normalizeSetName } from '../../../services/questionSets';
 import { QuestionEditor } from './QuestionEditor';
 
-export const UPLOAD_ACCEPT = '.pdf,.txt,.md,application/pdf,text/plain,image/*';
+export const UPLOAD_ACCEPT = '.pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/*';
 
 const ROLE_LABEL: Record<FileRole, string> = {
   questions: 'שאלות',

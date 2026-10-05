@@ -45,7 +45,7 @@ export function AdminOverview({ onNavigate }: { onNavigate: (s: AdminSection) =>
 
       <h2 className="mb-3 mt-8 text-lg font-semibold">פעולות מהירות</h2>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <QuickAction icon={FileUp} title="טעינת קובץ שאלות" text="PDF או קובץ טקסט" onClick={() => onNavigate('questions')} />
+        <QuickAction icon={FileUp} title="טעינת קובץ שאלות" text="PDF, Word או טקסט" onClick={() => onNavigate('questions')} />
         <QuickAction icon={ClipboardList} title="יצירת מבחן" text="תרגול או מבחן מסכם" onClick={() => onNavigate('exams')} />
         <QuickAction icon={UserPlus} title="הוספת משתמש" text="נבחן או מנהל" onClick={() => onNavigate('users')} />
       </div>

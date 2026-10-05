@@ -308,7 +308,7 @@ function UploadZone({ processing, onFiles }: { processing: string | null; onFile
           <div>
             <p className="font-semibold">שאלון חדש — גררו לכאן קבצים</p>
             <p className="text-sm text-slate-500 dark:text-slate-400">
-              קובץ שאלות (PDF / טקסט) + תמונות ותרשימים + קובץ מפתח תשובות — אפשר כמה יחד
+              קובץ שאלות (PDF / Word / טקסט) + תמונות ותרשימים + קובץ מפתח תשובות — אפשר כמה יחד
             </p>
           </div>
           <Button variant="primary" onClick={() => inputRef.current?.click()}>

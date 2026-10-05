@@ -10,10 +10,21 @@ const LATIN_LETTERS = 'abcdef';
 
 const QUESTION_RE = /^\s*(?:שאלה\s*(?:מס['׳]?\s*)?|Q(?:uestion)?\s*)?(\d{1,3})\s*[.):\-]\s*(.*)$/i;
 const OPTION_RE = /^\s*\(?([א-ו]|[a-fA-F])\s*[.)'׳]\s*(.*)$/;
-const ANSWER_KEY_HEADER_RE = /^\s*(מפתח(?:\s+תשובות)?|תשובות(?:\s+נכונות)?|answer\s*key|answers)\s*:?\s*$/i;
+const ANSWER_KEY_HEADER_RE =
+  /^\s*(מפתח(?:\s+(?:ה)?תשובות)?|(?:ה)?תשובות(?:\s+(?:ה)?נכונות)?|פתרונות|answer\s*(?:key|sheet)|answers|solutions)\s*:?\s*$/i;
 // Separator optional so table-style keys ("1  ב") work too.
 const ANSWER_PAIR_RE = /(\d{1,3})\s*[.):\-]?\s*\(?([א-ו]|[a-fA-F])(?![א-ת\w])/g;
 const CORRECT_MARK_RE = /^\s*[*✓✔]\s*|\s*[*✓✔]\s*$|\s*\((?:נכון|correct)\)\s*$/i;
+
+/**
+ * A line made only of "number letter" pairs — a row of an answer-key table such as
+ * "19 b 66 c 113 c 160 b" or "46 a 93 ג 140 b" — recognised even without a heading.
+ */
+export function isAnswerKeyLine(line: string): boolean {
+  const pairs = line.match(ANSWER_PAIR_RE);
+  if (!pairs) return false;
+  return !line.replace(ANSWER_PAIR_RE, '').replace(/[\s|,;:.·\-–—]/g, '');
+}
 
 function letterToIndex(letter: string): number {
   const he = HEBREW_LETTERS.indexOf(letter);
@@ -27,7 +38,7 @@ function letterToIndex(letter: string): number {
  *  - "1. question" / "שאלה 1:" / "Q1)" question headers
  *  - "א." / "(ב)" / "a)" option lines
  *  - a correct option marked with "*", "✓" or "(נכון)"
- *  - a trailing answer key ("מפתח תשובות" / "Answer key") with "1-ב 2-ג" pairs
+ *  - an answer key ("1-ב 2-ג", or table rows "19 b 66 c 113 c") after a heading or on its own
  */
 export function parseQuestions(text: string): ParsedQuestion[] {
   const questions: ParsedQuestion[] = [];
@@ -43,8 +54,12 @@ export function parseQuestions(text: string): ParsedQuestion[] {
       inAnswerKey = true;
       continue;
     }
-    if (inAnswerKey) {
-      for (const [num, index] of parseAnswerKey(line)) answerKey.set(num, index);
+    if (inAnswerKey || isAnswerKeyLine(line)) {
+      const pairs = parseAnswerKey(line);
+      for (const [num, index] of pairs) answerKey.set(num, index);
+      // A full key row means the key section has started: stray headings/page numbers
+      // after it must not be glued onto the last question's options.
+      if (pairs.size >= 3) inAnswerKey = true;
       continue;
     }
 

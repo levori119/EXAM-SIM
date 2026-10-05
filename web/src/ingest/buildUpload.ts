@@ -76,7 +76,7 @@ export async function addFilesToUpload(prev: UploadResult, files: File[]): Promi
       next.notices.push(`"${file.name}" זוהה כמפתח תשובות (${key.size} תשובות).`);
     } else {
       next.files.push({ file, role: 'unreadable' });
-      next.notices.push(`לא זוהו שאלות או מפתח תשובות ב-"${file.name}". פורמט נתמך: "1. שאלה" / "א. תשובה" / "1-ב".`);
+      next.notices.push(`לא זוהו שאלות או מפתח תשובות ב-"${file.name}". פורמט נתמך: "1. שאלה" / "א. תשובה" / "1-ב" / "19 b 66 c".`);
     }
   }
 
