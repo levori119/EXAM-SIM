@@ -1,0 +1,11 @@
+{
+  "name": "exam-sim",
+  "private": true,
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "npm --prefix web ci --include=dev && npm --prefix web run build",
+    "start": "npm --prefix web run start"
+  }
+}
