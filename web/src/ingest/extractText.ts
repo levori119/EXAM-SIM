@@ -1,4 +1,4 @@
-import { isAnswerKeyLine } from './parseQuestions';
+import { isRtlLine, loadPdf, pageLines } from './pdf';
 
 /** Returns the plain text of an uploaded file, or null if it has no text layer we can read. */
 export async function extractText(file: File): Promise<string | null> {
@@ -10,70 +10,28 @@ export async function extractText(file: File): Promise<string | null> {
   return null;
 }
 
-const HEBREW_RE = /[֐-׿]/g;
-const LATIN_OR_DIGIT_RE = /[A-Za-z0-9]/g;
-
-/**
- * Hebrew lines read right-to-left, but a line like "46 a 93 ג 140 b" (an English answer key with
- * one Hebrew letter) must stay left-to-right — so direction follows the majority script.
- */
-function isRtlLine(text: string): boolean {
-  return (text.match(HEBREW_RE)?.length ?? 0) > (text.match(LATIN_OR_DIGIT_RE)?.length ?? 0);
-}
-
-interface Run {
-  x: number;
-  y: number;
-  height: number;
-  str: string;
-}
-
 async function extractPdfText(file: File): Promise<string> {
-  // Loaded lazily: pdf.js is large and only admins uploading files need it.
-  const [pdfjs, { default: workerUrl }] = await Promise.all([
-    import('pdfjs-dist'),
-    import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
-  ]);
-  pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
-
-  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pdf = await loadPdf(file);
   const pages: string[] = [];
-
   for (let n = 1; n <= pdf.numPages; n++) {
-    const page = await pdf.getPage(n);
-    const content = await page.getTextContent();
-    const runs: Run[] = [];
-    for (const item of content.items) {
-      if (!('str' in item) || !item.str.trim()) continue;
-      runs.push({ x: item.transform[4], y: item.transform[5], height: item.height || 10, str: item.str });
-    }
-
-    // Group runs into visual lines, top to bottom. Table cells in one row can sit a little
-    // above or below each other, so a run joins the line if it's within ~half a line height.
-    runs.sort((a, b) => b.y - a.y);
-    const lines: Run[][] = [];
-    for (const run of runs) {
-      const line = lines[lines.length - 1];
-      if (line && Math.abs(line[0].y - run.y) <= Math.max(2, Math.min(line[0].height, run.height) * 0.5)) line.push(run);
-      else lines.push([run]);
-    }
-
-    pages.push(
-      lines
-        .map((line) => {
-          const join = (runs: Run[]) => runs.map((r) => r.str).join(' ').replace(/\s+/g, ' ').trim();
-          const ltr = join([...line].sort((a, b) => a.x - b.x));
-          const rtl = join([...line].sort((a, b) => b.x - a.x));
-          // Answer-key rows ("1 ב 4 ד 7 א") can't be told apart by script majority —
-          // prefer whichever reading order yields clean "number letter" pairs.
-          const ltrKey = isAnswerKeyLine(ltr);
-          if (ltrKey !== isAnswerKeyLine(rtl)) return ltrKey ? ltr : rtl;
-          return isRtlLine(ltr) ? rtl : ltr;
-        })
-        .join('\n'),
-    );
+    pages.push((await pageLines(await pdf.getPage(n))).map((l) => l.text).join('\n'));
   }
   return pages.join('\n');
+}
+
+const docxHtml = new WeakMap<File, Promise<Document>>();
+
+/** Converts a .docx to HTML once per File (shared by text and figure extraction). */
+export function loadDocx(file: File): Promise<Document> {
+  let doc = docxHtml.get(file);
+  if (!doc) {
+    doc = import('mammoth').then(async (mammoth) => {
+      const { value } = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() });
+      return new DOMParser().parseFromString(value, 'text/html');
+    });
+    docxHtml.set(file, doc);
+  }
+  return doc;
 }
 
 /**
@@ -82,9 +40,7 @@ async function extractPdfText(file: File): Promise<string> {
  * are numbered continuously across the document (questions), nested items get letters (options).
  */
 async function extractDocxText(file: File): Promise<string> {
-  const mammoth = await import('mammoth');
-  const { value: html } = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() });
-  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const doc = await loadDocx(file);
   const lines: string[] = [];
   let questionNumber = 0;
 

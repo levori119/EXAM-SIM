@@ -5,7 +5,7 @@ import { AlertTriangle, CheckCircle2, FileKey, FilePlus2, FileText, Image as Ima
 import { useAuth } from '../../../auth/AuthContext';
 import { Modal } from '../../../components/Modal';
 import { Button, ErrorText, inputClass } from '../../../components/fields';
-import { emptyDraft, saveUpload } from '../../../services/questionBank';
+import { emptyDraft, previewCrossLinks, saveUpload } from '../../../services/questionBank';
 import { addFilesToUpload, type FileRole, type UploadResult } from '../../../ingest/buildUpload';
 import { compressImage } from '../../../ingest/images';
 import { normalizeSetName } from '../../../services/questionSets';
@@ -16,6 +16,7 @@ export const UPLOAD_ACCEPT = '.pdf,.docx,.txt,.md,application/pdf,application/vn
 const ROLE_LABEL: Record<FileRole, string> = {
   questions: 'שאלות',
   answers: 'מפתח תשובות',
+  figures: 'תמונות',
   image: 'תמונה',
   unreadable: 'לא זוהה',
 };
@@ -52,6 +53,20 @@ export function UploadReviewDialog({
   }, [initial, fixedSetName]);
 
   const appending = existingNames.includes(normalizeSetName(setName));
+
+  // When adding to an existing questionnaire, pictures also link to its saved questions (and vice versa).
+  const [crossLinkCount, setCrossLinkCount] = useState(0);
+  useEffect(() => {
+    if (!upload || !appending) {
+      setCrossLinkCount(0);
+      return;
+    }
+    let cancelled = false;
+    void previewCrossLinks(setName, upload).then((n) => !cancelled && setCrossLinkCount(n));
+    return () => {
+      cancelled = true;
+    };
+  }, [upload, setName, appending]);
 
   const items = upload?.items ?? [];
   const unanswered = items.filter((i) => i.draft.correctIndex === null).length;
@@ -140,7 +155,9 @@ export function UploadReviewDialog({
             </datalist>
             <span className="block text-xs text-slate-500 dark:text-slate-400">
               {appending
-                ? 'קיים שאלון בשם הזה — השאלות, התמונות ומפתח התשובות יתווספו אליו.'
+                ? `קיים שאלון בשם הזה — השאלות, התמונות ומפתח התשובות יתווספו אליו.${
+                    crossLinkCount ? ` ${crossLinkCount} תמונות ישויכו לשאלות שכבר שמורות בשאלון.` : ''
+                  }`
                 : 'כל שאלון (שאלות + תשובות + איורים) הוא נושא נפרד שאפשר לשלב במבחנים ובתרגולים.'}
             </span>
           </label>
@@ -167,7 +184,7 @@ export function UploadReviewDialog({
             <ul className="flex flex-wrap gap-2 text-sm">
               {upload.files.map(({ file, role }, i) => (
                 <li key={i} className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 dark:bg-slate-800">
-                  {role === 'answers' ? <FileKey className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
+                  {role === 'answers' ? <FileKey className="h-4 w-4" /> : role === 'figures' ? <ImageIcon className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
                   <span className="max-w-48 truncate" dir="auto">{file.name}</span>
                   <span className={role === 'unreadable' ? 'text-amber-600' : 'text-slate-500'}>· {ROLE_LABEL[role]}</span>
                 </li>

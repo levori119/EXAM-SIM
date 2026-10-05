@@ -57,6 +57,8 @@ export interface Question {
   explanation: string;
   /** Attached diagrams/figures, ids into `media`. */
   imageIds: string[];
+  /** The question's number in its source file, for linking files added later ("36.png", answer keys). */
+  sourceNumber?: number | null;
   createdAt: number;
   updatedAt: number;
   pendingSync: 0 | 1;

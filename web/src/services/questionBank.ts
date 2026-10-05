@@ -1,7 +1,7 @@
 import { db, type Difficulty, type Question } from '../db/db';
 import type { UploadResult } from '../ingest/buildUpload';
-import { compressImage } from '../ingest/images';
-import { findOrCreateSet } from './questionSets';
+import { assignImages, compressImage } from '../ingest/images';
+import { findOrCreateSet, findSetByName } from './questionSets';
 
 export interface QuestionDraft {
   text: string;
@@ -46,11 +46,47 @@ function normalize(draft: QuestionDraft) {
 }
 
 /**
+ * Links between an upload and what its questionnaire already holds: new pictures for saved
+ * questions ("picture 36" uploaded before its pictures file), and saved pictures for new questions.
+ */
+async function crossLinks(setId: string, upload: UploadResult) {
+  const [savedQuestions, savedMedia] = await Promise.all([
+    db.questions.where('setId').equals(setId).toArray(),
+    db.media.where('setId').equals(setId).toArray(),
+  ]);
+  const questions = [
+    ...savedQuestions.map((q) => ({ text: q.text, number: q.sourceNumber ?? null })),
+    ...upload.items.map((i) => ({ text: i.draft.text, number: i.number })),
+  ];
+  const assigned = assignImages(questions, [...savedMedia, ...upload.media]);
+  const newMediaIds = new Set(upload.media.map((m) => m.id));
+  const savedMediaIds = new Set(savedMedia.map((m) => m.id));
+
+  const savedUpdates = savedQuestions
+    .map((q, i) => ({ q, add: assigned[i].filter((id) => newMediaIds.has(id) && !q.imageIds.includes(id)) }))
+    .filter((u) => u.add.length);
+  const newItemExtras = upload.items.map((item, i) =>
+    assigned[savedQuestions.length + i].filter((id) => savedMediaIds.has(id) && !item.draft.imageIds.includes(id)),
+  );
+  return { savedUpdates, newItemExtras };
+}
+
+/** For the review screen: how many links to an existing questionnaire's content saving will add. */
+export async function previewCrossLinks(setName: string, upload: UploadResult): Promise<number> {
+  const set = await findSetByName(setName);
+  if (!set) return 0;
+  const { savedUpdates, newItemExtras } = await crossLinks(set.id, upload);
+  return savedUpdates.reduce((s, u) => s + u.add.length, 0) + newItemExtras.reduce((s, x) => s + x.length, 0);
+}
+
+/**
  * Saves a reviewed upload into the questionnaire called `setName` (created if new):
- * source documents, compressed images and questions, atomically.
+ * source documents, compressed images and questions, atomically — and links pictures
+ * to questions already saved in that questionnaire.
  */
 export async function saveUpload(upload: UploadResult, setName: string, uploadedBy: string): Promise<string> {
   const setId = await findOrCreateSet(setName, uploadedBy);
+  const { savedUpdates, newItemExtras } = await crossLinks(setId, upload);
   const now = Date.now();
   const docs = upload.files.map(({ file, role }) => ({ id: crypto.randomUUID(), file, role }));
   const primaryId = (docs.find((d) => d.role === 'questions') ?? docs[0])?.id ?? null;
@@ -81,16 +117,20 @@ export async function saveUpload(upload: UploadResult, setName: string, uploaded
       })),
     );
     await db.questions.bulkAdd(
-      upload.items.map(({ draft }, i) => ({
+      upload.items.map(({ draft, number }, i) => ({
         id: crypto.randomUUID(),
         setId,
         documentId: primaryId,
-        ...normalize(draft),
+        ...normalize({ ...draft, imageIds: [...draft.imageIds, ...newItemExtras[i]] }),
+        sourceNumber: number,
         createdAt: now + i, // keeps file order when sorting by createdAt
         updatedAt: now,
         pendingSync: 1 as const,
       })),
     );
+    for (const { q, add } of savedUpdates) {
+      await db.questions.update(q.id, { imageIds: [...q.imageIds, ...add], updatedAt: now, pendingSync: 1 });
+    }
   });
   return setId;
 }
