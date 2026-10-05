@@ -25,6 +25,9 @@ export async function extractFigures(file: File): Promise<FigureExtraction> {
 
 const SCALE = 2;
 const INK = 235; // luminance below this counts as "ink"
+const CELL = 3; // connected-component grid resolution, in render pixels
+/** Minimum non-text ink (pixels at render scale) for a shape to count as a picture. */
+const MIN_DRAWING_INK = 400;
 
 interface Box {
   left: number;
@@ -33,12 +36,27 @@ interface Box {
   bottom: number;
 }
 
+interface Shape extends Box {
+  /** Ink pixels outside text lines — real drawing, not glyphs. */
+  drawingInk: number;
+}
+
 type CaptionSide = 'below' | 'above';
 
+const overlapX = (a: Box, b: Box) => Math.min(a.right, b.right) - Math.max(a.left, b.left);
+const union = (boxes: Box[]): Box => ({
+  left: Math.min(...boxes.map((b) => b.left)),
+  right: Math.max(...boxes.map((b) => b.right)),
+  top: Math.min(...boxes.map((b) => b.top)),
+  bottom: Math.max(...boxes.map((b) => b.bottom)),
+});
+
 /**
- * Picture pages are laid out as picture + caption cells (often in a grid). For every caption line
- * the page is rendered and the area between it and its neighbour caption in the same column is cut
- * out and trimmed — this captures raster images and vector drawings alike.
+ * Picture pages are grids of picture + caption ("תמונה 36"). The page is rendered and split into
+ * connected shapes (text lines excluded); each caption takes the shape right next to it — however
+ * wide (a picture spanning two grid columns) — plus any detached pieces inside its own cell.
+ * Titles and paragraphs are never the nearest shape to a caption, so they stay out. Works for
+ * raster images and vector drawings alike.
  */
 async function extractPdfFigures(file: File): Promise<FigureExtraction> {
   const pdf = await loadPdf(file);
@@ -49,11 +67,7 @@ async function extractPdfFigures(file: File): Promise<FigureExtraction> {
     const page = await pdf.getPage(n);
     // Captions of a row of pictures share a baseline, so look at each gap-separated piece of a line.
     const lines = (await pageLines(page)).flatMap((l) => (l.segments.length ? l.segments : [l]));
-    const captions = lines.flatMap((line) => {
-      const ref = captionRef(line.text);
-      return ref ? [{ ref, line }] : [];
-    });
-    if (!captions.length) continue;
+    if (!lines.some((l) => captionRef(l.text))) continue;
 
     const viewport = page.getViewport({ scale: SCALE });
     const canvas = document.createElement('canvas');
@@ -63,118 +77,222 @@ async function extractPdfFigures(file: File): Promise<FigureExtraction> {
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await page.render({ canvas, viewport, background: '#fff' }).promise;
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
 
     const toBox = (l: PdfLine): Box => {
       const [x1, y1] = viewport.convertToViewportPoint(l.x0, l.yBottom) as [number, number];
       const [x2, y2] = viewport.convertToViewportPoint(l.x1, l.yTop) as [number, number];
-      // Pad for ascenders/descenders and anti-aliasing, so neighbouring text never bleeds into a crop.
+      // Pad for ascenders/descenders and anti-aliasing.
       const top = Math.min(y1, y2);
       const bottom = Math.max(y1, y2);
       const h = bottom - top;
       return { left: Math.min(x1, x2), right: Math.max(x1, x2), top: top - h * 0.2, bottom: bottom + h * 0.35 };
     };
-    const caps = captions.map((c) => ({ ref: c.ref, box: toBox(c.line) }));
-    const center = (b: Box) => ({ x: (b.left + b.right) / 2, y: (b.top + b.bottom) / 2 });
+    const caps = lines.flatMap((l) => {
+      const ref = captionRef(l.text);
+      return ref ? [{ ref, box: toBox(l) }] : [];
+    });
+    const textBoxes = lines.filter((l) => !captionRef(l.text)).map(toBox);
+    // Captions and paragraph-width lines never join a shape; short labels inside drawings do.
+    const barriers = [...caps.map((c) => c.box), ...textBoxes.filter((t) => t.right - t.left > canvas.width * 0.35)];
+    const shapes = findShapes(pixels, canvas.width, canvas.height, textBoxes, barriers);
 
-    // Column of each caption: halfway to the nearest caption left/right of it in the same row.
-    const columns = caps.map((c) => {
-      const cc = center(c.box);
-      const rowHeight = (c.box.bottom - c.box.top) * 3;
+    // The shape nearest to a caption on one side, overlapping it horizontally.
+    const nearest = (cap: Box, dir: CaptionSide) => {
+      let best: Shape | null = null;
+      let bestGap = Infinity;
+      for (const s of shapes) {
+        if (overlapX(s, cap) <= 0) continue;
+        const gap = dir === 'below' ? cap.top - s.bottom : s.top - cap.bottom;
+        // Captions often touch their picture, so the padded caption box may overlap it slightly.
+        if (gap >= -(cap.bottom - cap.top) && gap < bestGap) {
+          best = s;
+          bestGap = gap;
+        }
+      }
+      return best ? { shape: best, gap: bestGap } : null;
+    };
+
+    // Picture above its caption, or below it? The side where shapes sit closer, on this page.
+    const gapsAbove = caps.map((c) => nearest(c.box, 'below')?.gap ?? Infinity).sort((a, b) => a - b);
+    const gapsBelow = caps.map((c) => nearest(c.box, 'above')?.gap ?? Infinity).sort((a, b) => a - b);
+    const median = (xs: number[]) => xs[Math.floor(xs.length / 2)];
+    if (median(gapsAbove) < median(gapsBelow)) side = 'below';
+    else if (median(gapsBelow) < median(gapsAbove)) side = 'above';
+
+    // Each caption's cell: halfway to the neighbouring captions in its row, up to the next caption above/below.
+    const cellOf = (i: number): Box => {
+      const c = caps[i].box;
+      const cx = (c.left + c.right) / 2;
+      const cy = (c.top + c.bottom) / 2;
+      const rowTol = (c.bottom - c.top) * 3;
       let left = 0;
       let right = canvas.width;
       for (const o of caps) {
-        if (o === c || Math.abs(center(o.box).y - cc.y) > rowHeight) continue;
-        const ox = center(o.box).x;
-        if (ox < cc.x) left = Math.max(left, (ox + cc.x) / 2);
-        else if (ox > cc.x) right = Math.min(right, (ox + cc.x) / 2);
+        const ox = (o.box.left + o.box.right) / 2;
+        if (o === caps[i] || Math.abs((o.box.top + o.box.bottom) / 2 - cy) > rowTol) continue;
+        if (ox < cx) left = Math.max(left, (ox + cx) / 2);
+        else if (ox > cx) right = Math.min(right, (ox + cx) / 2);
       }
-      return { left, right };
-    });
-
-    // Paragraph-like text (wide lines) bounds a picture; short labels inside drawings don't.
-    const obstacles = lines.filter((l) => !captionRef(l.text)).map(toBox);
-    const blockers = (col: { left: number; right: number }) => [
-      ...obstacles.filter((b) => b.right > col.left && b.left < col.right && b.right - b.left >= (col.right - col.left) * 0.5),
-      ...caps.map((c) => c.box).filter((b) => (b.left + b.right) / 2 > col.left && (b.left + b.right) / 2 < col.right),
-    ];
-    const spanAbove = (box: Box, col: { left: number; right: number }) =>
-      Math.max(0, ...blockers(col).filter((b) => b.bottom <= box.top + 1 && b !== box).map((b) => b.bottom));
-    const spanBelow = (box: Box, col: { left: number; right: number }) =>
-      Math.min(canvas.height, ...blockers(col).filter((b) => b.top >= box.bottom - 1 && b !== box).map((b) => b.top));
-
-    const inkIn = (r: Box) => {
-      const w = Math.floor(r.right - r.left);
-      const h = Math.floor(r.bottom - r.top);
-      if (w <= 0 || h <= 0) return 0;
-      const data = ctx.getImageData(Math.floor(r.left), Math.floor(r.top), w, h).data;
-      let ink = 0;
-      for (let i = 0; i < data.length; i += 16) if (data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11 < INK) ink++;
-      return ink;
+      const sameColumn = caps.filter((o) => o !== caps[i] && overlapX(o.box, { left, right, top: 0, bottom: 0 }) > 0);
+      const top = side === 'below' ? Math.max(0, ...sameColumn.filter((o) => o.box.bottom <= c.top).map((o) => o.box.bottom)) : c.bottom;
+      const bottom = side === 'below' ? c.top : Math.min(canvas.height, ...sameColumn.filter((o) => o.box.top >= c.bottom).map((o) => o.box.top));
+      return { left, right, top, bottom };
     };
 
-    // Is the picture above its caption or below it? Compare the ink above the topmost caption
-    // of each column with the ink below the bottommost one.
-    let above = 0;
-    let below = 0;
-    caps.forEach((c, i) => {
-      const col = columns[i];
-      const sameCol = caps.filter((_, j) => columns[j].left === col.left && columns[j].right === col.right);
-      if (sameCol.every((o) => o.box.top >= c.box.top)) above += inkIn({ ...col, top: spanAbove(c.box, col), bottom: c.box.top });
-      if (sameCol.every((o) => o.box.bottom <= c.box.bottom)) below += inkIn({ ...col, top: c.box.bottom, bottom: spanBelow(c.box, col) });
-    });
-    if (above > below * 1.5) side = 'below';
-    else if (below > above * 1.5) side = 'above';
-
+    const claimed = new Set<Shape>();
     for (let i = 0; i < caps.length; i++) {
-      const { ref, box } = caps[i];
-      const col = columns[i];
-      const region =
-        side === 'below'
-          ? { ...col, top: spanAbove(box, col), bottom: box.top }
-          : { ...col, top: box.bottom, bottom: spanBelow(box, col) };
-      const blob = await cropTrimmed(canvas, ctx, region);
-      if (blob) figures.push({ ref, blob });
+      const primary = nearest(caps[i].box, side);
+      if (!primary || claimed.has(primary.shape)) continue;
+      const cell = cellOf(i);
+      // Detached pieces of the same picture (white-background diagrams): wholly inside this cell and
+      // close to what has been gathered so far — a page title further up the cell is not part of it.
+      const inCell = shapes.filter(
+        (s) =>
+          s !== primary.shape &&
+          !claimed.has(s) &&
+          s.left >= cell.left &&
+          s.right <= cell.right &&
+          s.top >= cell.top &&
+          s.bottom <= cell.bottom,
+      );
+      const parts: Shape[] = [primary.shape];
+      for (let grew = true; grew; ) {
+        grew = false;
+        const box = union(parts);
+        const reach = Math.max(30, (box.bottom - box.top) * 0.15);
+        for (const s of inCell) {
+          if (parts.includes(s)) continue;
+          const dx = Math.max(0, s.left - box.right, box.left - s.right);
+          const dy = Math.max(0, s.top - box.bottom, box.top - s.bottom);
+          if (dx <= reach && dy <= reach) {
+            parts.push(s);
+            grew = true;
+          }
+        }
+      }
+      if (parts.reduce((sum, s) => sum + s.drawingInk, 0) < MIN_DRAWING_INK) continue; // only text
+      parts.forEach((s) => claimed.add(s));
+      const box = union(parts);
+      // Labels just outside the drawing (axis titles, arrows' text) belong to it — not captions.
+      const labels = textBoxes.filter(
+        (t) =>
+          t.right - t.left < (box.right - box.left) * 1.2 &&
+          overlapX(t, box) > 0 &&
+          t.bottom > box.top - 12 &&
+          t.top < box.bottom + 12,
+      );
+      const area = union([box, ...labels]);
+      // Never reach into the caption itself.
+      const cap = caps[i].box;
+      if (side === 'below') area.bottom = Math.min(area.bottom, cap.top);
+      else area.top = Math.max(area.top, cap.bottom);
+      const blob = await crop(canvas, area, side === 'below' ? { bottom: cap.top } : { top: cap.bottom });
+      if (blob) figures.push({ ref: caps[i].ref, blob });
     }
   }
   return { figures, missed: [] };
 }
 
-/** Cuts a region, trims the white margin around the drawing, and encodes it. */
-async function cropTrimmed(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, r: Box): Promise<Blob | null> {
-  const x = Math.max(0, Math.floor(r.left));
-  const y = Math.max(0, Math.floor(r.top));
-  const w = Math.min(canvas.width, Math.ceil(r.right)) - x;
-  const h = Math.min(canvas.height, Math.ceil(r.bottom)) - y;
-  if (w < 8 || h < 8) return null;
-  const { data } = ctx.getImageData(x, y, w, h);
+/**
+ * Connected shapes of ink on the rendered page, on a coarse grid (text lines masked out so
+ * captions and paragraphs don't glue pictures together).
+ */
+function findShapes(pixels: Uint8ClampedArray, width: number, height: number, textBoxes: Box[], barriers: Box[]): Shape[] {
+  const gw = Math.ceil(width / CELL);
+  const gh = Math.ceil(height / CELL);
+  // 1 = text (label), 2 = barrier (caption / paragraph): ignored completely.
+  const textMask = new Uint8Array(width * height);
+  const paint = (b: Box, value: number) => {
+    const x0 = Math.max(0, Math.floor(b.left));
+    const x1 = Math.min(width, Math.ceil(b.right));
+    for (let y = Math.max(0, Math.floor(b.top)); y < Math.min(height, Math.ceil(b.bottom)); y++) {
+      if (x1 > x0) textMask.fill(value, y * width + x0, y * width + x1);
+    }
+  };
+  textBoxes.forEach((b) => paint(b, 1));
+  barriers.forEach((b) => paint(b, 2));
 
-  let minX = w;
-  let minY = h;
-  let maxX = -1;
-  let maxY = -1;
-  for (let py = 0; py < h; py++) {
-    for (let px = 0; px < w; px++) {
-      const i = (py * w + px) * 4;
-      if (data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11 < INK) {
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
+  // Per cell: any ink at all (for connectivity, labels included) and drawing ink (outside text).
+  const cellInk = new Uint8Array(gw * gh);
+  const cellDrawing = new Uint32Array(gw * gh);
+  for (let y = 0; y < height; y++) {
+    const gy = (y / CELL) | 0;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (pixels[i] * 0.3 + pixels[i + 1] * 0.59 + pixels[i + 2] * 0.11 >= INK) continue;
+      const g = gy * gw + ((x / CELL) | 0);
+      const mask = textMask[y * width + x];
+      if (mask === 2) continue;
+      if (mask === 1) {
+        // Text inside a drawing still connects it; isolated text lines are dropped below.
+        cellInk[g] = cellInk[g] || 2;
+      } else {
+        cellInk[g] = 1;
+        cellDrawing[g]++;
       }
     }
   }
-  if (maxX - minX < 12 || maxY - minY < 12) return null; // nothing drawn here
 
-  // A little breathing room around the drawing, but never past the region (that's the neighbour's).
-  const pad = 8;
-  const cx = x + Math.max(0, minX - pad);
-  const cy = y + Math.max(0, minY - pad);
-  const cw = Math.min(x + w, x + maxX + 1 + pad) - cx;
-  const ch = Math.min(y + h, y + maxY + 1 + pad) - cy;
+  const label = new Int32Array(gw * gh).fill(-1);
+  const shapes: Shape[] = [];
+  const stack: number[] = [];
+  for (let start = 0; start < gw * gh; start++) {
+    if (cellInk[start] !== 1 || label[start] !== -1) continue; // shapes grow from drawing ink
+    const id = shapes.length;
+    let minX = gw;
+    let minY = gh;
+    let maxX = 0;
+    let maxY = 0;
+    let drawingInk = 0;
+    label[start] = id;
+    stack.push(start);
+    while (stack.length) {
+      const g = stack.pop()!;
+      const gx = g % gw;
+      const gy = (g / gw) | 0;
+      if (gx < minX) minX = gx;
+      if (gx > maxX) maxX = gx;
+      if (gy < minY) minY = gy;
+      if (gy > maxY) maxY = gy;
+      drawingInk += cellDrawing[g];
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = gx + dx;
+          const ny = gy + dy;
+          if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+          const ng = ny * gw + nx;
+          if (cellInk[ng] && label[ng] === -1) {
+            label[ng] = id;
+            stack.push(ng);
+          }
+        }
+      }
+    }
+    shapes.push({
+      left: minX * CELL,
+      top: minY * CELL,
+      right: Math.min(width, (maxX + 1) * CELL),
+      bottom: Math.min(height, (maxY + 1) * CELL),
+      drawingInk,
+    });
+  }
+  // Specks (dust, table rules' corners) aren't pictures.
+  return shapes.filter((s) => s.right - s.left >= 12 && s.bottom - s.top >= 12);
+}
+
+/** Cuts a box (plus a little white margin, never past `limit`) out of the rendered page. */
+async function crop(canvas: HTMLCanvasElement, b: Box, limit: { top?: number; bottom?: number } = {}): Promise<Blob | null> {
+  const pad = 6;
+  const x = Math.max(0, Math.floor(b.left) - pad);
+  const y = Math.max(0, limit.top ?? 0, Math.floor(b.top) - pad);
+  const w = Math.min(canvas.width, Math.ceil(b.right) + pad) - x;
+  const h = Math.min(canvas.height, limit.bottom ?? Infinity, Math.ceil(b.bottom) + pad) - y;
+  if (w < 12 || h < 12) return null;
   const out = document.createElement('canvas');
-  out.width = cw;
-  out.height = ch;
-  out.getContext('2d')!.drawImage(canvas, cx, cy, cw, ch, 0, 0, cw, ch);
+  out.width = w;
+  out.height = h;
+  out.getContext('2d')!.drawImage(canvas, x, y, w, h, 0, 0, w, h);
   return new Promise((resolve) => out.toBlob(resolve, 'image/webp', 0.9));
 }
 

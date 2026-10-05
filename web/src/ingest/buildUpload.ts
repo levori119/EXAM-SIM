@@ -1,7 +1,7 @@
 import { emptyDraft, type QuestionDraft } from '../services/questionBank';
 import { extractText } from './extractText';
 import { extractFigures } from './figures';
-import { assignImages, compressImage } from './images';
+import { assignImages, compressImage, linkText } from './images';
 import { parseAnswerKey, parseQuestions } from './parseQuestions';
 
 export interface ReviewItem {
@@ -111,7 +111,7 @@ export async function addFilesToUpload(prev: UploadResult, files: File[]): Promi
   next.media.push(...newMedia);
   const newIds = new Set(newMedia.map((m) => m.id));
   const assigned = assignImages(
-    next.items.map((i) => ({ text: i.draft.text, number: i.number })),
+    next.items.map((i) => ({ text: linkText(i.draft.text, i.draft.options), number: i.number })),
     next.media,
   );
   let linked = 0;
@@ -123,9 +123,9 @@ export async function addFilesToUpload(prev: UploadResult, files: File[]): Promi
     linked += matches.length;
     return { ...item, draft: { ...item.draft, imageIds: [...item.draft.imageIds, ...matches] } };
   });
-  if (newMedia.length) {
+  if (newMedia.length && next.items.length) {
     next.notices.push(
-      `${newMedia.length} תמונות, ${linked} שויכו אוטומטית לשאלות בקובץ. ניתן לשייך תמונות ידנית בכל שאלה.`,
+      `${newMedia.length} תמונות, ${linked} שויכו אוטומטית לשאלות בהעלאה הזו. ניתן לשייך תמונות ידנית בכל שאלה.`,
     );
   }
 

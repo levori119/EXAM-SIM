@@ -5,7 +5,7 @@ import { AlertTriangle, CheckCircle2, FileKey, FilePlus2, FileText, Image as Ima
 import { useAuth } from '../../../auth/AuthContext';
 import { Modal } from '../../../components/Modal';
 import { Button, ErrorText, inputClass } from '../../../components/fields';
-import { emptyDraft, previewCrossLinks, saveUpload } from '../../../services/questionBank';
+import { emptyDraft, previewCrossLinks, saveUpload, suggestSetForMedia } from '../../../services/questionBank';
 import { addFilesToUpload, type FileRole, type UploadResult } from '../../../ingest/buildUpload';
 import { compressImage } from '../../../ingest/images';
 import { normalizeSetName } from '../../../services/questionSets';
@@ -40,6 +40,7 @@ export function UploadReviewDialog({
   const { user } = useAuth();
   const [upload, setUpload] = useState<UploadResult | null>(initial);
   const [setName, setSetName] = useState('');
+  const [suggestion, setSuggestion] = useState<{ name: string; questions: number } | null>(null);
   const existingNames = useLiveQuery(async () => (await db.questionSets.toArray()).map((s) => s.name)) ?? [];
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -49,7 +50,19 @@ export function UploadReviewDialog({
   useEffect(() => {
     setUpload(initial);
     setSetName(fixedSetName ?? (initial ? defaultName(initial) : ''));
+    setSuggestion(null);
     setError(null);
+    // Pictures uploaded on their own belong with the questions that reference them.
+    if (!initial || fixedSetName) return;
+    let cancelled = false;
+    void suggestSetForMedia(initial).then((found) => {
+      if (cancelled || !found) return;
+      setSuggestion(found);
+      setSetName(found.name);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [initial, fixedSetName]);
 
   const appending = existingNames.includes(normalizeSetName(setName));
@@ -154,7 +167,11 @@ export function UploadReviewDialog({
               ))}
             </datalist>
             <span className="block text-xs text-slate-500 dark:text-slate-400">
-              {appending
+              {suggestion && normalizeSetName(setName) === suggestion.name
+                ? `התמונות שייכות לשאלון "${suggestion.name}" — ${suggestion.questions} שאלות בו מפנות אליהן. הן יתווספו אליו וישויכו לשאלות (${crossLinkCount} קישורים).`
+                : upload && !upload.items.length && upload.media.length
+                  ? 'אין שאלות בהעלאה הזו — כדי שהתמונות ישויכו, כתבו כאן את שם השאלון שבו נמצאות השאלות.'
+                  : appending
                 ? `קיים שאלון בשם הזה — השאלות, התמונות ומפתח התשובות יתווספו אליו.${
                     crossLinkCount ? ` ${crossLinkCount} תמונות ישויכו לשאלות שכבר שמורות בשאלון.` : ''
                   }`

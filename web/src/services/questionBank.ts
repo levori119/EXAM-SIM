@@ -1,6 +1,6 @@
 import { db, type Difficulty, type Question } from '../db/db';
 import type { UploadResult } from '../ingest/buildUpload';
-import { assignImages, compressImage } from '../ingest/images';
+import { assignImages, compressImage, linkText } from '../ingest/images';
 import { findOrCreateSet, findSetByName } from './questionSets';
 
 export interface QuestionDraft {
@@ -55,8 +55,8 @@ async function crossLinks(setId: string, upload: UploadResult) {
     db.media.where('setId').equals(setId).toArray(),
   ]);
   const questions = [
-    ...savedQuestions.map((q) => ({ text: q.text, number: q.sourceNumber ?? null })),
-    ...upload.items.map((i) => ({ text: i.draft.text, number: i.number })),
+    ...savedQuestions.map((q) => ({ text: linkText(q.text, q.options), number: q.sourceNumber ?? null })),
+    ...upload.items.map((i) => ({ text: linkText(i.draft.text, i.draft.options), number: i.number })),
   ];
   const assigned = assignImages(questions, [...savedMedia, ...upload.media]);
   const newMediaIds = new Set(upload.media.map((m) => m.id));
@@ -69,6 +69,26 @@ async function crossLinks(setId: string, upload: UploadResult) {
     assigned[savedQuestions.length + i].filter((id) => savedMediaIds.has(id) && !item.draft.imageIds.includes(id)),
   );
   return { savedUpdates, newItemExtras };
+}
+
+/**
+ * A pictures-only upload belongs with the questions that reference it: finds the questionnaire
+ * whose questions mention the most of these pictures ("picture 36" ↔ "תמונה 36").
+ */
+export async function suggestSetForMedia(upload: UploadResult): Promise<{ name: string; questions: number } | null> {
+  if (!upload.media.length || upload.items.length) return null;
+  const [sets, questions] = await Promise.all([db.questionSets.toArray(), db.questions.toArray()]);
+  let best: { name: string; questions: number } | null = null;
+  for (const set of sets) {
+    const qs = questions.filter((q) => q.setId === set.id);
+    const assigned = assignImages(
+      qs.map((q) => ({ text: linkText(q.text, q.options), number: q.sourceNumber ?? null })),
+      upload.media,
+    );
+    const linked = assigned.filter((ids) => ids.length).length;
+    if (linked && (!best || linked > best.questions)) best = { name: set.name, questions: linked };
+  }
+  return best;
 }
 
 /** For the review screen: how many links to an existing questionnaire's content saving will add. */

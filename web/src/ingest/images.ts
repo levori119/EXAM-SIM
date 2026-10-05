@@ -37,7 +37,7 @@ const FIGURE_REF_RE = new RegExp(
 );
 /** A caption line under/over a picture: "תמונה 36", "Figure 3: Port side", "איור 2 - מבט על". */
 const CAPTION_LINE_RE = new RegExp(
-  String.raw`^\s*${FIGURE_WORDS}[\s_\-.:#]*${NUMBER_WORD}(${NUMBER}|[א-ת](?=['׳"]|\s|$))['׳"]?\s*(?:[:.\-–—]\s*.{0,40})?$`,
+  String.raw`^\s*${FIGURE_WORDS}[\s_\-.:#]*${NUMBER_WORD}(${NUMBER}|[א-ת](?=['׳"]|\s|$))['׳"]?\s*(?:[:.\-–—]\s*[^?]{0,40})?$`,
   'i',
 );
 const QUESTION_FILENAME_RE = /^(?:q|question|שאלה|ש)?[\s_\-.]*(\d{1,3})(?:[\s_\-.][a-zא-ת\d]{0,3})?$/i;
@@ -69,7 +69,9 @@ export function figureRefsInText(text: string): string[] {
 
 /** The figure number of a caption line ("תמונה 36" → "36"), or null if the line isn't a caption. */
 export function captionRef(line: string): string | null {
-  const match = CAPTION_LINE_RE.exec(line.trim());
+  // PDFs sometimes split a word into pieces ("תמו נה 95"), so also try with them rejoined.
+  const match =
+    CAPTION_LINE_RE.exec(line.trim()) ?? CAPTION_LINE_RE.exec(line.trim().replace(/(?<=[א-ת])\s+(?=[א-ת])/g, ''));
   return match ? normalizeRef(match[1]) : null;
 }
 
@@ -77,6 +79,9 @@ export interface LinkableImage {
   id: string;
   name: string;
 }
+
+/** Text searched for figure references: the question and its answers ("a. Picture 1 is prior to…"). */
+export const linkText = (text: string, options: string[]) => [text, ...options].join('\n');
 
 export interface LinkableQuestion {
   text: string;
@@ -91,6 +96,9 @@ export interface LinkableQuestion {
  * Returns, per question, the ids of its images.
  */
 export function assignImages(questions: LinkableQuestion[], images: LinkableImage[]): string[][] {
+  // Pictures attach in figure order (1, 2, 3…), whatever order the file listed them in.
+  const order = (img: LinkableImage) => parseFloat(figureRefFromFilename(img.name) ?? String(questionNumberFromFilename(img.name) ?? Infinity));
+  images = [...images].sort((a, b) => order(a) - order(b));
   const refsPerQuestion = questions.map((q) => new Set(figureRefsInText(q.text)));
   const referenced = new Set(refsPerQuestion.flatMap((r) => [...r]));
   return questions.map((q, i) =>

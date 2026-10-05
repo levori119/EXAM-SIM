@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { FilePlus2, FileUp, FolderOpen, Image as ImageIcon, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { FilePlus2, FileUp, FolderOpen, GitMerge, Image as ImageIcon, Link2, List, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { db, type Question } from '../../../db/db';
 import { addFilesToUpload, EMPTY_UPLOAD, type UploadResult } from '../../../ingest/buildUpload';
 import {
@@ -14,7 +14,7 @@ import {
   validateDraft,
   type QuestionDraft,
 } from '../../../services/questionBank';
-import { deleteSet, listSetSummaries, renameSet, type SetSummary } from '../../../services/questionSets';
+import { deleteSet, listSetSummaries, mergeSet, relinkSet, renameSet, type SetSummary } from '../../../services/questionSets';
 import { ConfirmDialog, Modal } from '../../../components/Modal';
 import { EmptyState, PageHeader } from '../../../components/PageHeader';
 import { IconButton } from '../../../components/IconButton';
@@ -37,6 +37,19 @@ export function QuestionBankPage() {
   const [editing, setEditing] = useState<Editing>(null);
   const [deleting, setDeleting] = useState<Deleting>(null);
   const [renaming, setRenaming] = useState<SetSummary | null>(null);
+  const [merging, setMerging] = useState<SetSummary | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const relink = async (set: SetSummary) => {
+    const added = await relinkSet(set.id);
+    setToast(added ? `שויכו ${added} תמונות לשאלות ב"${set.name}".` : `לא נמצאו תמונות חדשות לשיוך ב"${set.name}".`);
+  };
 
   const [setFilter, setSetFilter] = useState('');
   const [query, setQuery] = useState('');
@@ -104,6 +117,8 @@ export function QuestionBankPage() {
                 onShow={() => showQuestionsOf(set.id)}
                 onAddFiles={(files) => handleFiles(files, set.name)}
                 onRename={() => setRenaming(set)}
+                onRelink={() => relink(set)}
+                onMerge={sets.length > 1 ? () => setMerging(set) : undefined}
                 onDelete={() => setDeleting({ kind: 'set', set })}
               />
             ))}
@@ -169,6 +184,17 @@ export function QuestionBankPage() {
       <UploadReviewDialog initial={upload?.result ?? null} setName={upload?.setName} onClose={() => setUpload(null)} />
       <QuestionDialog editing={editing} sets={sets ?? []} onChange={setEditing} />
       <RenameDialog set={renaming} onClose={() => setRenaming(null)} />
+      <MergeDialog
+        source={merging}
+        sets={sets ?? []}
+        onClose={() => setMerging(null)}
+        onMerged={(target, added) => setToast(`השאלון אוחד לתוך "${target}"${added ? ` ושויכו ${added} תמונות לשאלות` : ''}.`)}
+      />
+      {toast && (
+        <div role="status" className="fixed inset-x-4 bottom-24 z-50 mx-auto max-w-md rounded-2xl bg-slate-900 px-4 py-3 text-center text-white shadow-xl md:bottom-6 dark:bg-slate-100 dark:text-slate-900">
+          {toast}
+        </div>
+      )}
       <ConfirmDialog
         open={!!deleting}
         title={deleting?.kind === 'set' ? 'מחיקת שאלון' : 'מחיקת שאלה'}
@@ -196,6 +222,8 @@ function SetCard({
   onShow,
   onAddFiles,
   onRename,
+  onRelink,
+  onMerge,
   onDelete,
 }: {
   set: SetSummary;
@@ -203,6 +231,8 @@ function SetCard({
   onShow: () => void;
   onAddFiles: (files: File[]) => void;
   onRename: () => void;
+  onRelink: () => void;
+  onMerge?: () => void;
   onDelete: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -231,13 +261,21 @@ function SetCard({
           {set.documentNames.join(' · ')}
         </p>
       )}
-      <div className="mt-auto flex items-center gap-1 pt-3">
-        <Button variant="ghost" className="flex-1" onClick={onShow}>
-          שאלות
-        </Button>
-        <IconButton label="הוספת קבצים לשאלון" onClick={() => fileRef.current?.click()}>
+      <div className="mt-auto flex flex-wrap items-center gap-0.5 pt-3">
+        <IconButton label="הצגת השאלות" onClick={onShow}>
+          <List className="h-5 w-5" />
+        </IconButton>
+        <IconButton label="הוספת קבצים לשאלון (תמונות / מפתח תשובות)" onClick={() => fileRef.current?.click()}>
           <FilePlus2 className="h-5 w-5" />
         </IconButton>
+        <IconButton label="שיוך תמונות לשאלות מחדש" onClick={onRelink}>
+          <Link2 className="h-5 w-5" />
+        </IconButton>
+        {onMerge && (
+          <IconButton label="מיזוג לשאלון אחר" onClick={onMerge}>
+            <GitMerge className="h-5 w-5" />
+          </IconButton>
+        )}
         <IconButton label="שינוי שם" onClick={onRename}>
           <Pencil className="h-5 w-5" />
         </IconButton>
@@ -374,6 +412,76 @@ function RenameDialog({ set, onClose }: { set: SetSummary | null; onClose: () =>
     >
       <div className="space-y-3">
         <TextField id="rename-set" label="שם השאלון" value={name} onChange={(e) => setName(e.target.value)} />
+        <ErrorText message={error} />
+      </div>
+    </Modal>
+  );
+}
+
+function MergeDialog({
+  source,
+  sets,
+  onClose,
+  onMerged,
+}: {
+  source: SetSummary | null;
+  sets: SetSummary[];
+  onClose: () => void;
+  onMerged: (targetName: string, linksAdded: number) => void;
+}) {
+  const targets = sets.filter((s) => s.id !== source?.id);
+  const [targetId, setTargetId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!source) return;
+    setTargetId(sets.find((s) => s.id !== source.id)?.id ?? '');
+    setError(null);
+  }, [source, sets]);
+
+  const merge = async () => {
+    if (!source || !targetId) return;
+    setBusy(true);
+    try {
+      const added = await mergeSet(source.id, targetId);
+      onMerged(targets.find((t) => t.id === targetId)?.name ?? '', added);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'המיזוג נכשל.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={!!source}
+      title={`מיזוג "${source?.name ?? ''}"`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            ביטול
+          </Button>
+          <Button variant="primary" loading={busy} disabled={!targetId} onClick={merge}>
+            מיזוג
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-sm text-slate-600 dark:text-slate-300">
+          כל השאלות, הקבצים והתמונות של "{source?.name}" יעברו לשאלון שתבחרו, והתמונות ישויכו אוטומטית לשאלות שמפנות
+          אליהן (למשל "picture 36" ← "תמונה 36"). השאלון "{source?.name}" יימחק.
+        </p>
+        <SelectField id="merge-target" label="לאיזה שאלון למזג?" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+          {targets.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name} ({s.questionCount} שאלות)
+            </option>
+          ))}
+        </SelectField>
         <ErrorText message={error} />
       </div>
     </Modal>
