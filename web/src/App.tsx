@@ -1,6 +1,7 @@
 import { LogOut } from 'lucide-react';
 import { useAuth } from './auth/AuthContext';
 import { LoginScreen } from './features/login/LoginScreen';
+import { AdminLayout } from './features/admin/AdminLayout';
 import { Avatar } from './components/Avatar';
 import { OnlineBadge } from './components/OnlineBadge';
 
@@ -16,8 +17,9 @@ export function App() {
   }
 
   if (!user) return <LoginScreen />;
+  if (user.role === 'admin') return <AdminLayout />;
 
-  // Placeholder home until the dashboard is built.
+  // Placeholder examinee home until the exam runner is built.
   return (
     <div className="min-h-screen">
       <header className="flex items-center justify-between gap-4 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
@@ -25,7 +27,7 @@ export function App() {
           <Avatar name={user.displayName} color={user.avatarColor} />
           <div>
             <div className="font-semibold">{user.displayName}</div>
-            <div className="text-xs text-slate-500">{user.role === 'admin' ? 'מנהל' : 'נבחן'}</div>
+            <div className="text-xs text-slate-500">נבחן</div>
           </div>
         </div>
         <div className="flex items-center gap-3">

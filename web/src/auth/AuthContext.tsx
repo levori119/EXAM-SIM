@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { getUser, verifyLogin, type PublicUser } from './userService';
 
 const SESSION_KEY = 'exam-sim:session';
@@ -14,35 +15,38 @@ interface AuthState {
 const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<PublicUser | null>(null);
-  const [restoring, setRestoring] = useState(true);
+  const [sessionId, setSessionId] = useState(() => localStorage.getItem(SESSION_KEY));
 
-  useEffect(() => {
-    const storedId = localStorage.getItem(SESSION_KEY);
-    if (!storedId) {
-      setRestoring(false);
-      return;
-    }
-    getUser(storedId)
-      .then((u) => {
-        if (u) setUser(u);
-        else localStorage.removeItem(SESSION_KEY);
-      })
-      .finally(() => setRestoring(false));
+  // Live: edits to the signed-in user (name, role) show up immediately.
+  // The result is tagged with its session id because useLiveQuery keeps returning
+  // the previous session's result until the new query resolves.
+  const result = useLiveQuery(
+    async () => ({ sessionId, user: sessionId ? ((await getUser(sessionId)) ?? null) : null }),
+    [sessionId],
+  );
+  const current = result?.sessionId === sessionId ? result : undefined;
+  const user = current?.user;
+
+  const logout = useCallback(() => {
+    localStorage.removeItem(SESSION_KEY);
+    setSessionId(null);
   }, []);
+
+  // The signed-in user was deleted.
+  useEffect(() => {
+    if (sessionId && current && current.user === null) logout();
+  }, [sessionId, current, logout]);
 
   const login = useCallback(async (userId: string, password: string) => {
     const u = await verifyLogin(userId, password);
     localStorage.setItem(SESSION_KEY, u.id);
-    setUser(u);
+    setSessionId(u.id);
   }, []);
 
-  const logout = useCallback(() => {
-    localStorage.removeItem(SESSION_KEY);
-    setUser(null);
-  }, []);
-
-  const value = useMemo(() => ({ user, restoring, login, logout }), [user, restoring, login, logout]);
+  const value = useMemo(
+    () => ({ user: user ?? null, restoring: user === undefined, login, logout }),
+    [user, login, logout],
+  );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

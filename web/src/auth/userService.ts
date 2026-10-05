@@ -44,9 +44,7 @@ export async function createUser(input: CreateUserInput): Promise<PublicUser> {
   if (!/^[\p{L}\p{N}._-]{2,32}$/u.test(username)) {
     throw new AuthError('שם משתמש: 2–32 תווים, אותיות/ספרות/נקודה/מקף בלבד.');
   }
-  if (input.password.length < MIN_PASSWORD_LENGTH) {
-    throw new AuthError(`הסיסמה חייבת להכיל לפחות ${MIN_PASSWORD_LENGTH} תווים.`);
-  }
+  assertPassword(input.password);
   if (await db.users.where('username').equals(username).count()) {
     throw new AuthError('שם המשתמש כבר קיים.');
   }
@@ -85,4 +83,51 @@ export async function verifyLogin(userId: string, password: string): Promise<Pub
 export async function getUser(userId: string): Promise<PublicUser | undefined> {
   const user = await db.users.get(userId);
   return user && toPublicUser(user);
+}
+
+function assertPassword(password: string) {
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new AuthError(`הסיסמה חייבת להכיל לפחות ${MIN_PASSWORD_LENGTH} תווים.`);
+  }
+}
+
+/** Refuses changes that would leave the device without any administrator. */
+async function assertNotLastAdmin(userId: string) {
+  const user = await db.users.get(userId);
+  if (user?.role !== 'admin') return;
+  if ((await db.users.where('role').equals('admin').count()) <= 1) {
+    throw new AuthError('לא ניתן להסיר את המנהל האחרון במערכת.');
+  }
+}
+
+export async function updateUser(
+  userId: string,
+  changes: { displayName?: string; role?: UserRole },
+): Promise<void> {
+  const displayName = changes.displayName?.trim();
+  if (displayName !== undefined && !displayName) throw new AuthError('יש להזין שם.');
+  if (changes.role === 'examinee') await assertNotLastAdmin(userId);
+
+  await db.users.update(userId, {
+    ...(displayName !== undefined && { displayName }),
+    ...(changes.role && { role: changes.role }),
+    updatedAt: Date.now(),
+    pendingSync: 1,
+  });
+}
+
+export async function resetPassword(userId: string, password: string): Promise<void> {
+  assertPassword(password);
+  const salt = generateSalt();
+  await db.users.update(userId, {
+    salt,
+    passwordHash: await hashPassword(password, salt),
+    updatedAt: Date.now(),
+    pendingSync: 1,
+  });
+}
+
+export async function deleteUser(userId: string): Promise<void> {
+  await assertNotLastAdmin(userId);
+  await db.users.delete(userId);
 }
