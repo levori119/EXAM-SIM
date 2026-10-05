@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db } from '../../../db/db';
 import { AlertTriangle, CheckCircle2, FileKey, FilePlus2, FileText, Image as ImageIcon, Info, Plus, Trash2 } from 'lucide-react';
 import { useAuth } from '../../../auth/AuthContext';
 import { Modal } from '../../../components/Modal';
@@ -6,7 +8,8 @@ import { Button, ErrorText, inputClass } from '../../../components/fields';
 import { emptyDraft, saveUpload } from '../../../services/questionBank';
 import { addFilesToUpload, type FileRole, type UploadResult } from '../../../ingest/buildUpload';
 import { compressImage } from '../../../ingest/images';
-import { QuestionEditor, TOPICS_DATALIST_ID } from './QuestionEditor';
+import { normalizeSetName } from '../../../services/questionSets';
+import { QuestionEditor } from './QuestionEditor';
 
 export const UPLOAD_ACCEPT = '.pdf,.txt,.md,application/pdf,text/plain,image/*';
 
@@ -17,11 +20,26 @@ const ROLE_LABEL: Record<FileRole, string> = {
   unreadable: 'לא זוהה',
 };
 
+const defaultName = (upload: UploadResult) => {
+  const main = upload.files.find((f) => f.role === 'questions') ?? upload.files[0];
+  return main ? main.file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() : '';
+};
+
 /** Human-in-the-loop check of auto-detected questions, answers and images before they enter the bank. */
-export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult | null; onClose: () => void }) {
+export function UploadReviewDialog({
+  initial,
+  setName: fixedSetName,
+  onClose,
+}: {
+  initial: UploadResult | null;
+  /** Adding files to an existing questionnaire: its name, locked. */
+  setName?: string;
+  onClose: () => void;
+}) {
   const { user } = useAuth();
   const [upload, setUpload] = useState<UploadResult | null>(initial);
-  const [bulkTopic, setBulkTopic] = useState('');
+  const [setName, setSetName] = useState('');
+  const existingNames = useLiveQuery(async () => (await db.questionSets.toArray()).map((s) => s.name)) ?? [];
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,9 +47,11 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
 
   useEffect(() => {
     setUpload(initial);
-    setBulkTopic('');
+    setSetName(fixedSetName ?? (initial ? defaultName(initial) : ''));
     setError(null);
-  }, [initial]);
+  }, [initial, fixedSetName]);
+
+  const appending = existingNames.includes(normalizeSetName(setName));
 
   const items = upload?.items ?? [];
   const unanswered = items.filter((i) => i.draft.correctIndex === null).length;
@@ -39,19 +59,12 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
   const updateItems = (fn: (items: UploadResult['items']) => UploadResult['items']) =>
     setUpload((u) => (u ? { ...u, items: fn(u.items) } : u));
 
-  const applyTopic = (topic: string) => {
-    setBulkTopic(topic);
-    updateItems((is) => is.map((i) => ({ ...i, draft: { ...i.draft, topic } })));
-  };
-
   const addMoreFiles = async (files: FileList | null) => {
     if (!files?.length || !upload) return;
     setAdding(true);
     setError(null);
     try {
-      const next = await addFilesToUpload(upload, [...files]);
-      if (bulkTopic) next.items = next.items.map((i) => (i.draft.topic ? i : { ...i, draft: { ...i.draft, topic: bulkTopic } }));
-      setUpload(next);
+      setUpload(await addFilesToUpload(upload, [...files]));
     } catch (err) {
       setError(`קריאת הקבצים נכשלה: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -68,6 +81,10 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
 
   const save = async () => {
     if (!upload || !user) return;
+    if (!normalizeSetName(setName)) {
+      setError('יש לתת שם לשאלון.');
+      return;
+    }
     const broken = items.findIndex((i) => !i.draft.text.trim() || i.draft.options.filter((o) => o.trim()).length < 2);
     if (broken >= 0) {
       setError(`בשאלה ${broken + 1} חסר נוסח או שיש פחות משתי תשובות.`);
@@ -75,7 +92,7 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
     }
     setBusy(true);
     try {
-      await saveUpload(upload, user.id);
+      await saveUpload(upload, setName, user.id);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'השמירה נכשלה.');
@@ -88,7 +105,7 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
     <Modal
       open={!!initial}
       size="lg"
-      title="בדיקת קבצים ושאלות"
+      title={fixedSetName ? `הוספה לשאלון — ${fixedSetName}` : 'שאלון חדש — בדיקת קבצים ושאלות'}
       onClose={onClose}
       footer={
         <>
@@ -103,6 +120,31 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
     >
       {upload && (
         <>
+          {/* Questionnaire name */}
+          <label className="mb-4 block space-y-1.5" htmlFor="upload-set-name">
+            <span className="font-semibold">שם השאלון</span>
+            <input
+              id="upload-set-name"
+              list="question-set-names"
+              className={inputClass}
+              placeholder="לדוגמה: מבוא לרשתות — פרק 2"
+              value={setName}
+              disabled={!!fixedSetName}
+              onChange={(e) => setSetName(e.target.value)}
+              required
+            />
+            <datalist id="question-set-names">
+              {existingNames.map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
+            <span className="block text-xs text-slate-500 dark:text-slate-400">
+              {appending
+                ? 'קיים שאלון בשם הזה — השאלות, התמונות ומפתח התשובות יתווספו אליו.'
+                : 'כל שאלון (שאלות + תשובות + איורים) הוא נושא נפרד שאפשר לשלב במבחנים ובתרגולים.'}
+            </span>
+          </label>
+
           {/* Files in this upload */}
           <div className="mb-4 rounded-2xl border border-slate-200 p-4 dark:border-slate-800">
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -162,10 +204,6 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
                   )}
                 </div>
               </div>
-              <label className="block w-full space-y-1 sm:w-56">
-                <span className="text-sm text-slate-500">נושא לכל השאלות</span>
-                <input list={TOPICS_DATALIST_ID} className={inputClass} value={bulkTopic} onChange={(e) => applyTopic(e.target.value)} />
-              </label>
             </div>
           ) : (
             <p className="mb-4 flex gap-2 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
@@ -209,7 +247,7 @@ export function UploadReviewDialog({ initial, onClose }: { initial: UploadResult
           <Button
             variant="ghost"
             className="mt-4"
-            onClick={() => updateItems((is) => [...is, { number: null, draft: emptyDraft(bulkTopic) }])}
+            onClick={() => updateItems((is) => [...is, { number: null, draft: emptyDraft() }])}
           >
             <Plus className="h-5 w-5" /> הוספת שאלה ידנית
           </Button>

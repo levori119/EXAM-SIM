@@ -1,7 +1,8 @@
-import { db, type PracticeSettings, type Question } from '../db/db';
+import { db, type PracticeSettings, type Question, type SetQuota } from '../db/db';
+import { pickQuestions } from './composition';
 
 export type PracticeSource =
-  | { kind: 'topics'; topics: string[] } // empty = every topic
+  | { kind: 'mix'; quotas: SetQuota[] }
   | { kind: 'favorites' }
   | { kind: 'exam'; examId: string }
   | { kind: 'ids'; ids: string[] };
@@ -38,20 +39,15 @@ const answerable = (q: Question | undefined): q is Question => !!q && q.correctI
 /** All answerable questions for a source (before count limits and shuffling). */
 export async function loadSourceQuestions(source: PracticeSource, userId: string): Promise<Question[]> {
   switch (source.kind) {
-    case 'topics': {
-      const qs = source.topics.length
-        ? await db.questions.where('topic').anyOf(source.topics).toArray()
-        : await db.questions.toArray();
-      return qs.filter(answerable).sort((a, b) => a.createdAt - b.createdAt);
-    }
+    case 'mix':
+      return pickQuestions(source.quotas);
     case 'favorites': {
       const favs = await db.favorites.where('userId').equals(userId).sortBy('createdAt');
       return (await db.questions.bulkGet(favs.map((f) => f.questionId))).filter(answerable);
     }
     case 'exam': {
       const exam = await db.exams.get(source.examId);
-      if (!exam) return [];
-      return loadSourceQuestions({ kind: 'topics', topics: exam.topics }, userId);
+      return exam ? pickQuestions(exam.composition) : [];
     }
     case 'ids':
       return (await db.questions.bulkGet(source.ids)).filter(answerable);

@@ -3,7 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { AlertTriangle, ClipboardList, Clock, Copy, Eye, EyeOff, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react';
 import { db, type Exam, type ExamMode } from '../../../db/db';
 import { useAuth } from '../../../auth/AuthContext';
-import { topicCounts } from '../../../services/questionBank';
+import { answerableCounts, computeQuotas, DISTRIBUTION_LABELS, mixFromComposition, type MixValue } from '../../../services/composition';
 import {
   deleteExam,
   emptyExamDraft,
@@ -16,39 +16,38 @@ import {
 import { ConfirmDialog, Modal } from '../../../components/Modal';
 import { EmptyState, PageHeader } from '../../../components/PageHeader';
 import { IconButton } from '../../../components/IconButton';
+import { QuestionMixPicker, useMixSets } from '../../../components/QuestionMixPicker';
 import { Button, ErrorText, inputClass, TextAreaField, TextField, Toggle } from '../../../components/fields';
 
 type Editing = { id: string | null; draft: ExamDraft } | null;
 
-const toDraft = ({ title, description, mode, durationMinutes, questionCount, topics, shuffleQuestions, shuffleOptions, published }: Exam): ExamDraft => ({
+const toDraft = ({ title, description, mode, durationMinutes, questionCount, composition, distribution, shuffleQuestions, shuffleOptions, published }: Exam): ExamDraft => ({
   title,
   description,
   mode,
   durationMinutes,
   questionCount,
-  topics: [...topics],
+  composition: composition.map((c) => ({ ...c })),
+  distribution,
   shuffleQuestions,
   shuffleOptions,
   published,
 });
 
-/** Questions available to an exam drawing from `topics` (empty = all). */
-const availableFor = (counts: Map<string, number>, topics: string[]) =>
-  (topics.length ? topics : [...counts.keys()]).reduce((sum, t) => sum + (counts.get(t) ?? 0), 0);
-
 export function ExamsPage() {
   const exams = useLiveQuery(() => db.exams.orderBy('createdAt').reverse().toArray());
-  const counts = useLiveQuery(topicCounts) ?? new Map<string, number>();
+  const counts = useLiveQuery(answerableCounts) ?? new Map<string, number>();
+  const setNames = new Map((useLiveQuery(() => db.questionSets.toArray()) ?? []).map((s) => [s.id, s.name]));
   const [editing, setEditing] = useState<Editing>(null);
   const [deleting, setDeleting] = useState<Exam | null>(null);
 
-  const totalReady = availableFor(counts, []);
+  const totalReady = [...counts.values()].reduce((a, b) => a + b, 0);
 
   return (
     <>
       <PageHeader
         title="יצירת וניהול מבחנים"
-        subtitle={`${totalReady} שאלות מוכנות בבנק (עם תשובה נכונה)`}
+        subtitle={`${totalReady} שאלות מוכנות ב-${counts.size} שאלונים`}
         actions={
           <Button variant="primary" onClick={() => setEditing({ id: null, draft: emptyExamDraft() })}>
             <Plus className="h-5 w-5" /> מבחן חדש
@@ -58,12 +57,12 @@ export function ExamsPage() {
 
       {exams?.length === 0 ? (
         <EmptyState icon={<ClipboardList className="h-10 w-10" />} title="עדיין אין מבחנים">
-          {totalReady ? 'צרו מבחן תרגול או מבחן מסכם מתוך בנק השאלות.' : 'קודם טענו שאלות לבנק השאלות, ואז צרו מבחן.'}
+          {totalReady ? 'צרו מבחן תרגול או מבחן מסכם משילוב של שאלונים.' : 'קודם טענו שאלונים, ואז צרו מבחן.'}
         </EmptyState>
       ) : (
         <ul className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {exams?.map((exam) => {
-            const available = availableFor(counts, exam.topics);
+            const short = exam.composition.filter((c) => c.count > (counts.get(c.setId) ?? 0));
             return (
               <li key={exam.id} className="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
                 <div className="mb-2 flex items-start justify-between gap-3">
@@ -93,17 +92,30 @@ export function ExamsPage() {
                       <Shuffle className="h-4 w-4" /> ערבוב
                     </span>
                   )}
-                  <span>{exam.topics.length ? exam.topics.join(', ') : 'כל הנושאים'}</span>
                 </div>
 
-                {available < exam.questionCount && (
+                <ul className="mt-3 space-y-1 text-sm">
+                  {exam.composition.map((c) => (
+                    <li key={c.setId} className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate text-slate-600 dark:text-slate-300" dir="auto">
+                        {setNames.get(c.setId) ?? 'שאלון שנמחק'}
+                      </span>
+                      <span className="tabular-nums text-slate-500">
+                        {c.count} ({Math.round((c.count / Math.max(1, exam.questionCount)) * 100)}%)
+                      </span>
+                    </li>
+                  ))}
+                  <li className="text-xs text-slate-400">חלוקה: {DISTRIBUTION_LABELS[exam.distribution]}</li>
+                </ul>
+
+                {short.length > 0 && (
                   <p className="mt-3 flex items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
                     <AlertTriangle className="h-4 w-4 shrink-0" />
-                    זמינות רק {available} שאלות בנושאים שנבחרו
+                    אין מספיק שאלות זמינות ב: {short.map((c) => setNames.get(c.setId)).join(', ')}
                   </p>
                 )}
 
-                <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 dark:border-slate-800">
+                <div className="mt-auto flex items-center justify-between border-t border-slate-100 pt-3 dark:border-slate-800">
                   <button
                     onClick={() => setExamPublished(exam.id, !exam.published)}
                     className={`inline-flex min-h-12 items-center gap-2 rounded-xl px-3 text-sm font-semibold ${
@@ -136,7 +148,7 @@ export function ExamsPage() {
         </ul>
       )}
 
-      <ExamDialog editing={editing} counts={counts} onChange={setEditing} />
+      <ExamDialog editing={editing} onChange={setEditing} />
       <ConfirmDialog
         open={!!deleting}
         title="מחיקת מבחן"
@@ -148,29 +160,37 @@ export function ExamsPage() {
   );
 }
 
-function ExamDialog({
-  editing,
-  counts,
-  onChange,
-}: {
-  editing: Editing;
-  counts: Map<string, number>;
-  onChange: (e: Editing) => void;
-}) {
+function ExamDialog({ editing, onChange }: { editing: Editing; onChange: (e: Editing) => void }) {
   const { user } = useAuth();
+  const sets = useMixSets() ?? [];
+  const [mix, setMix] = useState<MixValue>({ setIds: [], distribution: 'proportional', total: 10, custom: {} });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isOpen = !!editing;
-  useEffect(() => setError(null), [isOpen, editing?.id]);
+  useEffect(() => {
+    if (!editing) return;
+    setError(null);
+    const { composition, distribution, questionCount } = editing.draft;
+    setMix(composition.length ? mixFromComposition(composition, distribution, questionCount) : { setIds: [], distribution, total: 10, custom: {} });
+    // Only when a dialog opens — later draft edits flow from the mix, not back into it.
+  }, [isOpen, editing?.id]);
 
   if (!editing) return <Modal open={false} title="" onClose={() => onChange(null)}>{null}</Modal>;
 
   const { draft } = editing;
-  const set = <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) =>
-    onChange({ ...editing, draft: { ...draft, [key]: value } });
-  const available = availableFor(counts, draft.topics);
-  const topics = [...counts.keys()].sort((a, b) => a.localeCompare(b, 'he'));
+  const set = <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) => onChange({ ...editing, draft: { ...draft, [key]: value } });
+  const available = new Map(sets.map((s) => [s.id, s.available]));
+  const setNames = new Map(sets.map((s) => [s.id, s.name]));
+
+  const changeMix = (next: MixValue) => {
+    setMix(next);
+    const composition = computeQuotas(next, available).filter((q) => q.count > 0);
+    onChange({
+      ...editing,
+      draft: { ...draft, composition, distribution: next.distribution, questionCount: composition.reduce((s, q) => s + q.count, 0) },
+    });
+  };
 
   const setMode = (mode: ExamMode) =>
     onChange({
@@ -178,11 +198,8 @@ function ExamDialog({
       draft: { ...draft, mode, durationMinutes: mode === 'final' ? (draft.durationMinutes ?? 60) : draft.durationMinutes },
     });
 
-  const toggleTopic = (topic: string) =>
-    set('topics', draft.topics.includes(topic) ? draft.topics.filter((t) => t !== topic) : [...draft.topics, topic]);
-
   const save = async () => {
-    const problem = validateExam(draft, available);
+    const problem = validateExam(draft, available, setNames);
     if (problem) {
       setError(problem);
       return;
@@ -211,7 +228,7 @@ function ExamDialog({
             ביטול
           </Button>
           <Button variant="primary" loading={busy} onClick={save}>
-            שמירה
+            שמירה ({draft.questionCount} שאלות)
           </Button>
         </>
       }
@@ -241,77 +258,30 @@ function ExamDialog({
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <label className="block space-y-1.5" htmlFor="exam-count">
-            <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-              מספר שאלות <span className="font-normal text-slate-400">(זמינות: {available})</span>
-            </span>
-            <input
-              id="exam-count"
-              type="number"
-              inputMode="numeric"
-              min={1}
-              max={available || undefined}
-              className={inputClass}
-              value={draft.questionCount || ''}
-              onChange={(e) => set('questionCount', Number(e.target.value))}
-            />
-          </label>
-          <label className="block space-y-1.5" htmlFor="exam-duration">
-            <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-              זמן (דקות) {draft.mode === 'practice' && <span className="font-normal text-slate-400">— ריק = ללא הגבלה</span>}
-            </span>
-            <input
-              id="exam-duration"
-              type="number"
-              inputMode="numeric"
-              min={1}
-              className={inputClass}
-              value={draft.durationMinutes ?? ''}
-              onChange={(e) => set('durationMinutes', e.target.value ? Number(e.target.value) : null)}
-            />
-          </label>
-        </div>
+        <section className="rounded-2xl border border-slate-200 p-4 dark:border-slate-800">
+          <h3 className="mb-3 font-semibold">שאלונים ויחס שאלות</h3>
+          <QuestionMixPicker sets={sets} value={mix} onChange={changeMix} />
+        </section>
 
-        <div>
-          <span className="mb-1.5 block text-sm font-medium text-slate-600 dark:text-slate-300">
-            נושאים <span className="font-normal text-slate-400">— ללא בחירה = כל הנושאים</span>
+        <label className="block space-y-1.5 sm:w-1/2" htmlFor="exam-duration">
+          <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+            זמן (דקות) {draft.mode === 'practice' && <span className="font-normal text-slate-400">— ריק = ללא הגבלה</span>}
           </span>
-          {topics.length ? (
-            <div className="flex flex-wrap gap-2">
-              {topics.map((topic) => {
-                const selected = draft.topics.includes(topic);
-                return (
-                  <button
-                    key={topic}
-                    type="button"
-                    onClick={() => toggleTopic(topic)}
-                    aria-pressed={selected}
-                    className={`min-h-12 rounded-xl border px-4 text-sm font-medium transition ${
-                      selected
-                        ? 'border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300'
-                        : 'border-slate-300 hover:border-indigo-300 dark:border-slate-700'
-                    }`}
-                  >
-                    {topic} <span className="text-slate-400">({counts.get(topic)})</span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-sm text-slate-500">אין עדיין שאלות עם תשובה נכונה בבנק.</p>
-          )}
-        </div>
+          <input
+            id="exam-duration"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            className={inputClass}
+            value={draft.durationMinutes ?? ''}
+            onChange={(e) => set('durationMinutes', e.target.value ? Number(e.target.value) : null)}
+          />
+        </label>
 
         <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 px-4 dark:divide-slate-800 dark:border-slate-800">
-          <Toggle label="ערבוב סדר השאלות" checked={draft.shuffleQuestions} onChange={(v) => set('shuffleQuestions', v)} />
+          <Toggle label="ערבוב סדר השאלות" hint="כבוי = השאלות מסודרות לפי שאלון" checked={draft.shuffleQuestions} onChange={(v) => set('shuffleQuestions', v)} />
           <Toggle label="ערבוב סדר התשובות" checked={draft.shuffleOptions} onChange={(v) => set('shuffleOptions', v)} />
-          <Toggle
-            label="פרסום לנבחנים"
-            hint="מבחן שאינו מפורסם נשמר כטיוטה"
-            checked={draft.published}
-            onChange={(v) => set('published', v)}
-          />
+          <Toggle label="פרסום לנבחנים" hint="מבחן שאינו מפורסם נשמר כטיוטה" checked={draft.published} onChange={(v) => set('published', v)} />
         </div>
 
         <ErrorText message={error} />

@@ -6,7 +6,6 @@ import { ImageAttachments, type MediaItem } from '../../../components/media';
 
 const OPTION_LETTERS = 'אבגדהוזח';
 export const MAX_OPTIONS = OPTION_LETTERS.length;
-export const TOPICS_DATALIST_ID = 'question-topics';
 
 interface Props {
   draft: QuestionDraft;
@@ -100,36 +99,23 @@ export function QuestionEditor({ draft, onChange, compact, idPrefix, media }: Pr
         />
       )}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <label className="block space-y-1.5" htmlFor={`${idPrefix}-topic`}>
-          <span className="text-sm text-slate-500 dark:text-slate-400">נושא</span>
-          <input
-            id={`${idPrefix}-topic`}
-            list={TOPICS_DATALIST_ID}
+      {!compact && (
+        <label className="block space-y-1.5 sm:w-1/2" htmlFor={`${idPrefix}-difficulty`}>
+          <span className="text-sm text-slate-500 dark:text-slate-400">רמת קושי</span>
+          <select
+            id={`${idPrefix}-difficulty`}
             className={inputClass}
-            placeholder="כללי"
-            value={draft.topic}
-            onChange={(e) => set('topic', e.target.value)}
-          />
+            value={draft.difficulty}
+            onChange={(e) => set('difficulty', e.target.value as Difficulty)}
+          >
+            {Object.entries(DIFFICULTY_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
         </label>
-        {!compact && (
-          <label className="block space-y-1.5" htmlFor={`${idPrefix}-difficulty`}>
-            <span className="text-sm text-slate-500 dark:text-slate-400">רמת קושי</span>
-            <select
-              id={`${idPrefix}-difficulty`}
-              className={inputClass}
-              value={draft.difficulty}
-              onChange={(e) => set('difficulty', e.target.value as Difficulty)}
-            >
-              {Object.entries(DIFFICULTY_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-      </div>
+      )}
 
       {!compact && (
         <label className="block space-y-1.5" htmlFor={`${idPrefix}-explanation`}>
@@ -144,15 +130,5 @@ export function QuestionEditor({ draft, onChange, compact, idPrefix, media }: Pr
         </label>
       )}
     </div>
-  );
-}
-
-export function TopicsDatalist({ topics }: { topics: string[] }) {
-  return (
-    <datalist id={TOPICS_DATALIST_ID}>
-      {topics.map((t) => (
-        <option key={t} value={t} />
-      ))}
-    </datalist>
   );
 }
