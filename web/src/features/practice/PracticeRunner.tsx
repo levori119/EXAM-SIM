@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion, type PanInfo } from 'framer-motion';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Check, ChevronLeft, ChevronRight, Grid3x3, Lightbulb, Star, X } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Grid3x3, Lightbulb, Save, Star, X } from 'lucide-react';
 import { db, type MediaFile, type Question } from '../../db/db';
 import { useAuth } from '../../auth/AuthContext';
-import { toggleFavorite, type Answers, type PracticeItem, type PracticeRound } from '../../services/practice';
-import { ConfirmDialog } from '../../components/Modal';
-import { Button } from '../../components/fields';
+import { defaultSavedName, toggleFavorite, type Answers, type PracticeItem, type PracticeRound } from '../../services/practice';
+import { ConfirmDialog, Modal } from '../../components/Modal';
+import { Button, TextField } from '../../components/fields';
 import { ZoomableImage } from '../../components/media';
 
 const LETTERS = 'אבגדהוזח';
@@ -39,16 +39,24 @@ export function FavoriteButton({ questionId, favorite, size = 'md' }: { question
 interface Props {
   round: PracticeRound;
   questions: Map<string, Question>;
+  /** Resuming a saved practice: where it stopped. */
+  initialAnswers?: Answers;
+  initialIndex?: number;
+  /** Name of the saved practice this round was loaded from (saving overwrites it). */
+  savedName?: string;
   onFinish: (answers: Answers) => void;
+  onSave: (name: string, answers: Answers, index: number) => Promise<void>;
   onExit: () => void;
 }
 
-export function PracticeRunner({ round, questions, onFinish, onExit }: Props) {
-  const [index, setIndex] = useState(0);
+export function PracticeRunner({ round, questions, initialAnswers, initialIndex, savedName, onFinish, onSave, onExit }: Props) {
+  const [index, setIndex] = useState(initialIndex ?? 0);
   const [direction, setDirection] = useState(1);
-  const [answers, setAnswers] = useState<Answers>({});
+  const [answers, setAnswers] = useState<Answers>(initialAnswers ?? {});
   const [showPalette, setShowPalette] = useState(false);
-  const [confirm, setConfirm] = useState<'exit' | 'finish' | null>(null);
+  const [dialog, setDialog] = useState<'exit' | 'finish' | 'save' | null>(null);
+  const [savedToast, setSavedToast] = useState(false);
+  const [exitAfterSave, setExitAfterSave] = useState(false);
   const favorites = useFavoriteIds();
 
   const immediate = round.settings.reveal === 'immediate';
@@ -58,6 +66,12 @@ export function PracticeRunner({ round, questions, onFinish, onExit }: Props) {
   const chosen = answers[item.questionId];
   const locked = immediate && chosen !== undefined;
   const answeredCount = Object.keys(answers).length;
+
+  useEffect(() => {
+    if (!savedToast) return;
+    const t = setTimeout(() => setSavedToast(false), 2500);
+    return () => clearTimeout(t);
+  }, [savedToast]);
 
   const go = useCallback(
     (to: number) => {
@@ -78,14 +92,14 @@ export function PracticeRunner({ round, questions, onFinish, onExit }: Props) {
   );
 
   const requestFinish = useCallback(() => {
-    if (answeredCount < total) setConfirm('finish');
+    if (answeredCount < total) setDialog('finish');
     else onFinish(answers);
   }, [answeredCount, total, answers, onFinish]);
 
   // Keyboard: 1-8 / א-ח choose, arrows navigate (RTL: left = next), Enter = next/finish.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (confirm || e.target instanceof HTMLInputElement) return;
+      if (dialog || showPalette || e.target instanceof HTMLInputElement) return;
       const digit = Number(e.key);
       const letter = LETTERS.indexOf(e.key);
       const pos = digit >= 1 ? digit - 1 : letter;
@@ -99,7 +113,7 @@ export function PracticeRunner({ round, questions, onFinish, onExit }: Props) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [confirm, item, choose, go, index, total, chosen, requestFinish]);
+  }, [dialog, showPalette, item, choose, go, index, total, chosen, requestFinish]);
 
   const onSwipe = (_: unknown, info: PanInfo) => {
     if (Math.abs(info.offset.x) < 80 || Math.abs(info.offset.y) > Math.abs(info.offset.x)) return;
@@ -110,9 +124,9 @@ export function PracticeRunner({ round, questions, onFinish, onExit }: Props) {
   return (
     <div className="mx-auto max-w-5xl">
       {/* Header */}
-      <div className="mb-4 flex items-center gap-3">
+      <div className="mb-4 flex items-center gap-2">
         <button
-          onClick={() => setConfirm('exit')}
+          onClick={() => setDialog('exit')}
           aria-label="יציאה מהתרגול"
           className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
         >
@@ -120,7 +134,7 @@ export function PracticeRunner({ round, questions, onFinish, onExit }: Props) {
         </button>
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2">
-            <h1 className="truncate font-semibold" dir="auto">{round.title}</h1>
+            <h1 className="truncate font-semibold" dir="auto">{savedName ?? round.title}</h1>
             <span className="shrink-0 text-sm tabular-nums text-slate-500">
               {index + 1} / {total}
             </span>
@@ -135,103 +149,240 @@ export function PracticeRunner({ round, questions, onFinish, onExit }: Props) {
           </div>
         </div>
         <button
+          onClick={() => setDialog('save')}
+          aria-label="שמירת התרגול"
+          title="שמירת התרגול להמשך מאוחר יותר"
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+        >
+          <Save className="h-6 w-6" />
+        </button>
+        <button
           onClick={() => setShowPalette((p) => !p)}
-          aria-label="מפת שאלות"
-          aria-expanded={showPalette}
+          aria-label={showPalette ? 'חזרה לשאלה' : 'מפת שאלות'}
+          aria-pressed={showPalette}
           className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${
-            showPalette ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'
+            showPalette ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'
           }`}
         >
           <Grid3x3 className="h-6 w-6" />
         </button>
       </div>
 
-      <AnimatePresence initial={false}>
-        {showPalette && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="overflow-hidden"
-          >
-            <QuestionPalette
-              items={round.items}
-              current={index}
-              answers={answers}
-              questions={questions}
-              favorites={favorites}
-              immediate={immediate}
-              onGo={go}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Question */}
-      <AnimatePresence mode="wait" initial={false} custom={direction}>
-        <motion.div
-          key={item.questionId}
-          custom={direction}
-          initial={{ opacity: 0, x: direction * -40 }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={{ opacity: 0, x: direction * 40 }}
-          transition={{ duration: 0.18 }}
-          drag="x"
-          dragConstraints={{ left: 0, right: 0 }}
-          dragElastic={0.15}
-          dragDirectionLock
-          onDragEnd={onSwipe}
-          className="touch-pan-y"
-        >
-          <QuestionCard
-            question={question}
-            item={item}
-            chosen={chosen}
-            reveal={locked}
-            favorite={favorites.has(question.id)}
-            onChoose={choose}
+      {showPalette ? (
+        // The map replaces the question; picking a number goes straight to it.
+        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+          <QuestionPalette
+            items={round.items}
+            current={index}
+            answers={answers}
+            questions={questions}
+            favorites={favorites}
+            immediate={immediate}
+            onGo={go}
           />
+          <div className="mt-4 flex flex-wrap justify-between gap-2">
+            <Button onClick={() => setShowPalette(false)}>
+              <ChevronRight className="h-5 w-5" /> חזרה לשאלה {index + 1}
+            </Button>
+            {!immediate && (
+              <Button variant="primary" onClick={requestFinish}>
+                הגשה ({answeredCount}/{total})
+              </Button>
+            )}
+          </div>
         </motion.div>
-      </AnimatePresence>
+      ) : (
+        <>
+          <AnimatePresence mode="wait" initial={false} custom={direction}>
+            <motion.div
+              key={item.questionId}
+              custom={direction}
+              initial={{ opacity: 0, x: direction * -40 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: direction * 40 }}
+              transition={{ duration: 0.18 }}
+              drag="x"
+              dragConstraints={{ left: 0, right: 0 }}
+              dragElastic={0.15}
+              dragDirectionLock
+              onDragEnd={onSwipe}
+              className="touch-pan-y"
+            >
+              <QuestionCard
+                question={question}
+                item={item}
+                chosen={chosen}
+                reveal={locked}
+                favorite={favorites.has(question.id)}
+                onChoose={choose}
+              />
+            </motion.div>
+          </AnimatePresence>
 
-      {/* Navigation */}
-      <div className="sticky bottom-20 mt-4 flex items-center justify-between gap-2 md:bottom-4">
-        <Button onClick={() => go(index - 1)} disabled={index === 0}>
-          <ChevronRight className="h-5 w-5" /> הקודמת
-        </Button>
-        {!immediate && (
-          <Button variant="ghost" onClick={requestFinish} className="hidden sm:inline-flex">
-            הגשה ({answeredCount}/{total})
-          </Button>
-        )}
-        {index < total - 1 ? (
-          <Button variant={locked ? 'primary' : 'secondary'} onClick={() => go(index + 1)}>
-            הבאה <ChevronLeft className="h-5 w-5" />
-          </Button>
-        ) : (
-          <Button variant="primary" onClick={requestFinish}>
-            סיום והצגת תוצאות
-          </Button>
-        )}
-      </div>
+          {/* Navigation */}
+          <div className="sticky bottom-20 mt-4 flex items-center justify-between gap-2 md:bottom-4">
+            <Button onClick={() => go(index - 1)} disabled={index === 0}>
+              <ChevronRight className="h-5 w-5" /> הקודמת
+            </Button>
+            {!immediate && (
+              <Button variant="ghost" onClick={requestFinish} className="hidden sm:inline-flex">
+                הגשה ({answeredCount}/{total})
+              </Button>
+            )}
+            {index < total - 1 ? (
+              <Button variant={locked ? 'primary' : 'secondary'} onClick={() => go(index + 1)}>
+                הבאה <ChevronLeft className="h-5 w-5" />
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={requestFinish}>
+                סיום והצגת תוצאות
+              </Button>
+            )}
+          </div>
+        </>
+      )}
 
-      <ConfirmDialog
-        open={confirm === 'exit'}
-        title="יציאה מהתרגול"
-        message="התשובות בתרגול הזה לא יישמרו. לצאת?"
-        confirmLabel="יציאה"
-        onConfirm={onExit}
-        onClose={() => setConfirm(null)}
+      <SaveDialog
+        open={dialog === 'save'}
+        defaultName={savedName ?? defaultSavedName(round)}
+        onClose={() => {
+          setDialog(null);
+          setExitAfterSave(false);
+        }}
+        onSave={async (name) => {
+          await onSave(name, answers, index);
+          setDialog(null);
+          if (exitAfterSave) onExit();
+          else setSavedToast(true);
+        }}
+      />
+      <ExitDialog
+        open={dialog === 'exit'}
+        answeredCount={answeredCount}
+        onClose={() => setDialog(null)}
+        onSaveAndExit={() => {
+          setExitAfterSave(true);
+          setDialog('save');
+        }}
+        onExit={onExit}
       />
       <ConfirmDialog
-        open={confirm === 'finish'}
+        open={dialog === 'finish'}
         title="סיום התרגול"
         message={`ענית על ${answeredCount} מתוך ${total} שאלות. שאלות שלא נענו ייחשבו כשגויות. לסיים?`}
         confirmLabel="סיום"
         onConfirm={() => onFinish(answers)}
-        onClose={() => setConfirm(null)}
+        onClose={() => setDialog(null)}
       />
+      <AnimatePresence>
+        {savedToast && (
+          <motion.div
+            role="status"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-x-4 bottom-24 z-50 mx-auto max-w-sm rounded-2xl bg-slate-900 px-4 py-3 text-center text-white shadow-xl md:bottom-6 dark:bg-slate-100 dark:text-slate-900"
+          >
+            התרגול נשמר — אפשר להמשיך אותו מ"תרגולים שמורים".
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
+  );
+}
+
+function SaveDialog({
+  open,
+  defaultName,
+  onClose,
+  onSave,
+}: {
+  open: boolean;
+  defaultName: string;
+  onClose: () => void;
+  onSave: (name: string) => Promise<void>;
+}) {
+  const [name, setName] = useState(defaultName);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (open) setName(defaultName);
+  }, [open, defaultName]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await onSave(name);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      title="שמירת התרגול"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            ביטול
+          </Button>
+          <Button variant="primary" loading={busy} onClick={save}>
+            <Save className="h-5 w-5" /> שמירה
+          </Button>
+        </>
+      }
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+        className="space-y-2"
+      >
+        <TextField id="saved-practice-name" label="שם לתרגול" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        <p className="text-xs text-slate-500 dark:text-slate-400">התשובות והמיקום נשמרים — אפשר להמשיך בדיוק מאותה שאלה.</p>
+      </form>
+    </Modal>
+  );
+}
+
+function ExitDialog({
+  open,
+  answeredCount,
+  onClose,
+  onSaveAndExit,
+  onExit,
+}: {
+  open: boolean;
+  answeredCount: number;
+  onClose: () => void;
+  onSaveAndExit: () => void;
+  onExit: () => void;
+}) {
+  return (
+    <Modal
+      open={open}
+      title="יציאה מהתרגול"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            ביטול
+          </Button>
+          <Button variant="danger" onClick={onExit}>
+            יציאה בלי לשמור
+          </Button>
+          <Button variant="primary" onClick={onSaveAndExit}>
+            <Save className="h-5 w-5" /> שמירה ויציאה
+          </Button>
+        </>
+      }
+    >
+      <p className="text-slate-600 dark:text-slate-300">
+        {answeredCount ? `ענית על ${answeredCount} שאלות. ` : ''}לשמור את התרגול כדי להמשיך אותו מאוחר יותר?
+      </p>
+    </Modal>
   );
 }
 
@@ -356,8 +507,32 @@ function QuestionPalette({
   immediate: boolean;
   onGo: (i: number) => void;
 }) {
+  const legend = immediate
+    ? [
+        ['bg-emerald-500', 'נכונה'],
+        ['bg-red-500', 'שגויה'],
+        ['bg-slate-200 dark:bg-slate-700', 'טרם נענתה'],
+      ]
+    : [
+        ['bg-indigo-500', 'נענתה'],
+        ['bg-slate-200 dark:bg-slate-700', 'טרם נענתה'],
+      ];
   return (
-    <div className="mb-4 flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+    <div className="rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-semibold">מפת שאלות</h2>
+        <ul className="flex flex-wrap gap-3 text-xs text-slate-500 dark:text-slate-400">
+          {legend.map(([cls, label]) => (
+            <li key={label} className="flex items-center gap-1.5">
+              <span className={`h-3 w-3 rounded ${cls}`} /> {label}
+            </li>
+          ))}
+          <li className="flex items-center gap-1.5">
+            <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" /> מסומנת
+          </li>
+        </ul>
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(3rem,1fr))] gap-2">
       {items.map(({ questionId }, i) => {
         const answer = answers[questionId];
         let tone = 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
@@ -372,7 +547,8 @@ function QuestionPalette({
           <button
             key={questionId}
             onClick={() => onGo(i)}
-            className={`relative h-12 w-12 rounded-xl text-sm font-semibold tabular-nums ${tone} ${
+            aria-label={`שאלה ${i + 1}`}
+            className={`relative h-12 rounded-xl text-sm font-semibold tabular-nums ${tone} ${
               i === current ? 'ring-2 ring-indigo-500 ring-offset-2 dark:ring-offset-slate-900' : ''
             }`}
           >
@@ -381,6 +557,7 @@ function QuestionPalette({
           </button>
         );
       })}
+      </div>
     </div>
   );
 }

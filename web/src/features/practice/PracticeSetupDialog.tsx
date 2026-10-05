@@ -34,20 +34,33 @@ export function PracticeSetupDialog({
   const [settings, setSettings] = useState<PracticeSettings>({ shuffleQuestions: true, shuffleOptions: false, reveal: 'immediate' });
   const [count, setCount] = useState(0);
   const [mix, setMix] = useState<MixValue>({ setIds: [], distribution: 'proportional', total: 20, custom: {} });
+  // Fixed lists (favorites, mistakes…) can be narrowed to some questionnaires.
+  const [onlySets, setOnlySets] = useState<string[]>([]);
 
   useEffect(() => {
     if (!request) return;
     setSettings(request.settings);
     if (request.kind === 'mix') setMix(request.mix);
-    else setCount(request.defaultCount);
+    else {
+      setCount(request.defaultCount);
+      setOnlySets([...new Set(request.questions.map((q) => q.setId))]);
+    }
   }, [request]);
+
+  const fixedQuestions = request?.kind === 'fixed' ? request.questions.filter((q) => onlySets.includes(q.setId)) : [];
+  const fixedSetIds = request?.kind === 'fixed' ? [...new Set(request.questions.map((q) => q.setId))] : [];
+  const toggleSet = (id: string) => {
+    const next = onlySets.includes(id) ? onlySets.filter((x) => x !== id) : [...onlySets, id];
+    setOnlySets(next);
+    if (request?.kind === 'fixed') setCount(request.questions.filter((q) => next.includes(q.setId)).length);
+  };
 
   const set = <K extends keyof PracticeSettings>(key: K, value: PracticeSettings[K]) => setSettings((s) => ({ ...s, [key]: value }));
 
   const available = new Map(sets.map((s) => [s.id, s.available]));
   const quotas = computeQuotas(mix, available);
   const mixTotal = quotaTotal(quotas);
-  const fixedAvailable = request?.kind === 'fixed' ? request.questions.length : 0;
+  const fixedAvailable = fixedQuestions.length;
   const valid = request?.kind === 'mix' ? mixTotal >= 1 : count >= 1 && count <= fixedAvailable;
 
   const title =
@@ -58,7 +71,7 @@ export function PracticeSetupDialog({
   const start = () => {
     if (!request) return;
     if (request.kind === 'mix') onStart({ kind: 'mix', title, quotas: quotas.filter((q) => q.count > 0), settings });
-    else onStart({ kind: 'fixed', title: request.title, questions: request.questions, count, settings });
+    else onStart({ kind: 'fixed', title: request.title, questions: fixedQuestions, count, settings });
   };
 
   return (
@@ -78,7 +91,7 @@ export function PracticeSetupDialog({
         </>
       }
     >
-      {request?.kind === 'fixed' && fixedAvailable === 0 ? (
+      {request?.kind === 'fixed' && request.questions.length === 0 ? (
         <p className="text-slate-500">אין שאלות זמינות לתרגול הזה.</p>
       ) : (
         <div className="space-y-5">
@@ -88,6 +101,31 @@ export function PracticeSetupDialog({
               <QuestionMixPicker sets={sets} value={mix} onChange={setMix} />
             </section>
           ) : (
+            <>
+            {fixedSetIds.length > 1 && request?.kind === 'fixed' && (
+              <div>
+                <span className="mb-1.5 block text-sm font-medium text-slate-600 dark:text-slate-300">מאילו שאלונים?</span>
+                <div className="flex flex-wrap gap-2">
+                  {fixedSetIds.map((id) => {
+                    const on = onlySets.includes(id);
+                    const n = request.questions.filter((q) => q.setId === id).length;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => toggleSet(id)}
+                        className={`min-h-12 rounded-xl border px-4 text-sm font-medium transition ${
+                          on ? 'border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300' : 'border-slate-300 dark:border-slate-700'
+                        }`}
+                      >
+                        <span dir="auto">{sets.find((s) => s.id === id)?.name ?? 'שאלון'}</span> <span className="text-slate-400">({n})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <label className="block space-y-1.5" htmlFor="practice-count">
               <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
                 מספר שאלות <span className="font-normal text-slate-400">(מתוך {fixedAvailable})</span>
@@ -110,6 +148,7 @@ export function PracticeSetupDialog({
                 )}
               </div>
             </label>
+            </>
           )}
 
           <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 px-4 dark:divide-slate-800 dark:border-slate-800">

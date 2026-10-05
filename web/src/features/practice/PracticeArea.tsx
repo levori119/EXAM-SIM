@@ -1,30 +1,50 @@
 import { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BookOpenCheck, ClipboardList, FolderOpen, Layers, Star } from 'lucide-react';
+import { BarChart3, BookOpenCheck, ClipboardList, FolderOpen, Layers, Play, RotateCcw, Star, Trash2 } from 'lucide-react';
 import { db, type PracticeSettings, type Question } from '../../db/db';
 import { useAuth } from '../../auth/AuthContext';
 import { pickQuestions, type MixValue } from '../../services/composition';
 import {
   buildRound,
   DEFAULT_SETTINGS,
+  deleteSavedPractice,
+  loadSavedPractice,
   loadSourceQuestions,
+  savePracticeProgress,
   savePracticeSession,
   scoreRound,
   type Answers,
   type PracticeRound,
   type PracticeSource,
 } from '../../services/practice';
+import { commonMistakeIds } from '../../services/stats';
 import { EmptyState, PageHeader } from '../../components/PageHeader';
 import { useMixSets } from '../../components/QuestionMixPicker';
+import { IconButton } from '../../components/IconButton';
+import { ConfirmDialog } from '../../components/Modal';
 import { Button } from '../../components/fields';
 import { PracticeSetupDialog, type SetupRequest, type SetupResult } from './PracticeSetupDialog';
 import { PracticeRunner } from './PracticeRunner';
 import { PracticeSummary } from './PracticeSummary';
+import { StatsView } from './StatsView';
+
+type Running = {
+  kind: 'running';
+  round: PracticeRound;
+  questions: Map<string, Question>;
+  /** Set when the round was saved / resumed, so saving again overwrites it. */
+  savedId?: string;
+  savedName?: string;
+  initialAnswers?: Answers;
+  initialIndex?: number;
+};
 
 type Phase =
   | { kind: 'home' }
-  | { kind: 'running'; round: PracticeRound; questions: Map<string, Question> }
+  | Running
   | { kind: 'summary'; round: PracticeRound; questions: Map<string, Question>; answers: Answers };
+
+type Tab = 'practice' | 'stats';
 
 const dateFormat = new Intl.DateTimeFormat('he-IL', { dateStyle: 'short', timeStyle: 'short' });
 
@@ -34,6 +54,7 @@ type FixedDefaults = Partial<PracticeSettings> & { count?: number };
 export function PracticeArea() {
   const { user } = useAuth();
   const [phase, setPhase] = useState<Phase>({ kind: 'home' });
+  const [tab, setTab] = useState<Tab>('practice');
   const [setup, setSetup] = useState<SetupRequest | null>(null);
   const [lastSettings, setLastSettings] = useState<PracticeSettings>(DEFAULT_SETTINGS);
   if (!user) return null;
@@ -65,18 +86,79 @@ export function PracticeArea() {
     setSetup(null);
   };
 
+  const resume = async (id: string) => {
+    const loaded = await loadSavedPractice(id);
+    if (!loaded) return;
+    setPhase({
+      kind: 'running',
+      round: loaded.round,
+      questions: loaded.questions,
+      savedId: id,
+      savedName: loaded.saved.name,
+      initialAnswers: loaded.answers,
+      initialIndex: loaded.index,
+    });
+  };
+
+  const save = async (name: string, answers: Answers, index: number) => {
+    if (phase.kind !== 'running') return;
+    const savedId = await savePracticeProgress(phase.savedId ?? null, user.id, name, phase.round, answers, index);
+    setPhase({ ...phase, savedId, savedName: name.trim() || phase.savedName, initialAnswers: answers, initialIndex: index });
+  };
+
   const finish = async (answers: Answers) => {
     if (phase.kind !== 'running') return;
     const { correct } = scoreRound(phase.round, answers, phase.questions);
     await savePracticeSession(user.id, phase.round, answers, correct);
+    // A finished round no longer needs its saved progress.
+    if (phase.savedId) await deleteSavedPractice(phase.savedId);
     setPhase({ kind: 'summary', round: phase.round, questions: phase.questions, answers });
   };
 
   return (
     <>
-      {phase.kind === 'home' && <PracticeHome onMix={requestMix} onFixed={requestFixed} />}
+      {phase.kind === 'home' && (
+        <>
+          <div className="mb-6 inline-flex rounded-2xl bg-slate-100 p-1 dark:bg-slate-800" role="tablist">
+            {(
+              [
+                ['practice', 'תרגול', BookOpenCheck],
+                ['stats', 'סטטיסטיקה', BarChart3],
+              ] as const
+            ).map(([value, label, Icon]) => (
+              <button
+                key={value}
+                role="tab"
+                aria-selected={tab === value}
+                onClick={() => setTab(value)}
+                className={`inline-flex min-h-12 items-center gap-2 rounded-xl px-5 font-semibold transition ${
+                  tab === value ? 'bg-white shadow dark:bg-slate-900' : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                }`}
+              >
+                <Icon className="h-5 w-5" />
+                {label}
+              </button>
+            ))}
+          </div>
+          {tab === 'practice' ? (
+            <PracticeHome onMix={requestMix} onFixed={requestFixed} onResume={resume} />
+          ) : (
+            <StatsView onPractice={(title, ids) => requestFixed(title, { kind: 'ids', ids })} />
+          )}
+        </>
+      )}
       {phase.kind === 'running' && (
-        <PracticeRunner round={phase.round} questions={phase.questions} onFinish={finish} onExit={() => setPhase({ kind: 'home' })} />
+        <PracticeRunner
+          key={phase.round.startedAt}
+          round={phase.round}
+          questions={phase.questions}
+          initialAnswers={phase.initialAnswers}
+          initialIndex={phase.initialIndex}
+          savedName={phase.savedName}
+          onFinish={finish}
+          onSave={save}
+          onExit={() => setPhase({ kind: 'home' })}
+        />
       )}
       {phase.kind === 'summary' && (
         <PracticeSummary
@@ -95,15 +177,21 @@ export function PracticeArea() {
 function PracticeHome({
   onMix,
   onFixed,
+  onResume,
 }: {
   onMix: (setIds: string[], total: number) => void;
   onFixed: (title: string, source: PracticeSource, defaults?: FixedDefaults) => void;
+  onResume: (id: string) => void;
 }) {
   const { user } = useAuth();
+  const userId = user?.id ?? '';
   const sets = useMixSets();
-  const favoriteCount = useLiveQuery(() => db.favorites.where('userId').equals(user?.id ?? '').count(), [user?.id]);
+  const favoriteCount = useLiveQuery(() => db.favorites.where('userId').equals(userId).count(), [userId]);
+  const mistakeCount = useLiveQuery(async () => (await commonMistakeIds(userId)).length, [userId]);
   const exams = useLiveQuery(() => db.exams.filter((e) => e.published && e.mode === 'practice').toArray());
-  const sessions = useLiveQuery(() => db.practiceSessions.where('userId').equals(user?.id ?? '').reverse().sortBy('finishedAt'), [user?.id]);
+  const sessions = useLiveQuery(() => db.practiceSessions.where('userId').equals(userId).reverse().sortBy('finishedAt'), [userId]);
+  const saved = useLiveQuery(() => db.savedPractices.where('userId').equals(userId).reverse().sortBy('savedAt'), [userId]);
+  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
 
   const total = (sets ?? []).reduce((s, x) => s + x.available, 0);
 
@@ -122,9 +210,44 @@ function PracticeHome({
     <>
       <PageHeader title="תרגול" subtitle={sets ? `${total} שאלות ב-${sets.length} שאלונים` : undefined} />
 
+      {/* Saved practices */}
+      {!!saved?.length && (
+        <section className="mb-6">
+          <h2 className="mb-3 text-lg font-semibold">תרגולים שמורים</h2>
+          <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
+            {saved.map((s) => {
+              const answered = Object.keys(s.answers).length;
+              const totalItems = s.round.items.length;
+              return (
+                <li key={s.id} className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+                  <button onClick={() => onResume(s.id)} className="flex min-h-12 min-w-0 flex-1 items-center gap-3 text-start">
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300">
+                      <Play className="h-5 w-5" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-semibold" dir="auto">{s.name}</span>
+                      <span className="block text-xs text-slate-500">
+                        {answered}/{totalItems} נענו · עצרתם בשאלה {s.index + 1}
+                      </span>
+                      <span className="block text-xs text-slate-400">נשמר {dateFormat.format(s.savedAt)}</span>
+                      <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <span className="block h-full rounded-full bg-indigo-500" style={{ width: `${(answered / totalItems) * 100}%` }} />
+                      </span>
+                    </span>
+                  </button>
+                  <IconButton label="מחיקת התרגול השמור" danger onClick={() => setDeleting({ id: s.id, name: s.name })}>
+                    <Trash2 className="h-5 w-5" />
+                  </IconButton>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {/* Questionnaires */}
-        <section className="rounded-3xl border border-slate-200 bg-white p-5 lg:col-span-2 dark:border-slate-800 dark:bg-slate-900">
+        <section className="rounded-3xl border border-slate-200 bg-white p-5 lg:col-span-2 lg:row-span-2 dark:border-slate-800 dark:bg-slate-900">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
               <h2 className="flex items-center gap-2 text-lg font-semibold">
@@ -155,20 +278,26 @@ function PracticeHome({
         </section>
 
         {/* Favorites */}
-        <section className="flex flex-col rounded-3xl bg-gradient-to-br from-amber-400 to-orange-500 p-5 text-white shadow-lg shadow-orange-500/20">
-          <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold">
-            <Star className="h-5 w-5 fill-current" /> השאלות המסומנות שלי
-          </h2>
-          <p className="mb-4 flex-1 text-sm text-white/85">שאלות שסימנתם בכוכב במהלך תרגול, כדי לחזור אליהן.</p>
-          <div className="mb-3 text-4xl font-bold tabular-nums">{favoriteCount ?? '–'}</div>
-          <button
-            disabled={!favoriteCount}
-            onClick={() => onFixed('השאלות המסומנות', { kind: 'favorites' })}
-            className="min-h-12 rounded-xl bg-white/95 px-4 font-semibold text-orange-600 transition hover:bg-white disabled:opacity-50"
-          >
-            תרגול על המסומנות
-          </button>
-        </section>
+        <FocusCard
+          tone="amber"
+          icon={<Star className="h-5 w-5 fill-current" />}
+          title="השאלות המסומנות שלי"
+          text="שאלות שסימנתם בכוכב במהלך תרגול."
+          count={favoriteCount}
+          action="תרגול על המסומנות"
+          onClick={() => onFixed('השאלות המסומנות', { kind: 'favorites' })}
+        />
+
+        {/* Common mistakes */}
+        <FocusCard
+          tone="rose"
+          icon={<RotateCcw className="h-5 w-5" />}
+          title="טעויות נפוצות"
+          text="שאלות שטעיתם בהן שוב ושוב, או בפעם האחרונה. כשתענו נכון הן ירדו מהרשימה."
+          count={mistakeCount}
+          action="תרגול על הטעויות"
+          onClick={() => onFixed('טעויות נפוצות', { kind: 'mistakes' })}
+        />
       </div>
 
       {!!exams?.length && (
@@ -213,23 +342,58 @@ function PracticeHome({
                   <div className="text-sm tabular-nums text-slate-500">
                     {s.correctCount}/{s.questionIds.length}
                   </div>
-                  <div
-                    className={`w-14 rounded-full py-1 text-center text-sm font-semibold tabular-nums ${
-                      pct >= 80
-                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
-                        : pct >= 55
-                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'
-                          : 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300'
-                    }`}
-                  >
-                    {pct}%
-                  </div>
+                  <div className="w-14 text-center text-sm font-semibold tabular-nums">{pct}%</div>
                 </li>
               );
             })}
           </ul>
         </section>
       )}
+
+      <ConfirmDialog
+        open={!!deleting}
+        title="מחיקת תרגול שמור"
+        message={`למחוק את "${deleting?.name ?? ''}"? ההתקדמות בו תאבד.`}
+        onConfirm={() => (deleting ? deleteSavedPractice(deleting.id) : undefined)}
+        onClose={() => setDeleting(null)}
+      />
     </>
+  );
+}
+
+function FocusCard({
+  tone,
+  icon,
+  title,
+  text,
+  count,
+  action,
+  onClick,
+}: {
+  tone: 'amber' | 'rose';
+  icon: React.ReactNode;
+  title: string;
+  text: string;
+  count: number | undefined;
+  action: string;
+  onClick: () => void;
+}) {
+  const bg = tone === 'amber' ? 'from-amber-400 to-orange-500 shadow-orange-500/20' : 'from-rose-500 to-pink-600 shadow-rose-500/20';
+  const fg = tone === 'amber' ? 'text-orange-600' : 'text-rose-600';
+  return (
+    <section className={`flex flex-col rounded-3xl bg-gradient-to-br p-5 text-white shadow-lg ${bg}`}>
+      <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold">
+        {icon} {title}
+      </h2>
+      <p className="mb-3 flex-1 text-sm text-white/85">{text}</p>
+      <div className="mb-3 text-4xl font-bold tabular-nums">{count ?? '–'}</div>
+      <button
+        disabled={!count}
+        onClick={onClick}
+        className={`min-h-12 rounded-xl bg-white/95 px-4 font-semibold transition hover:bg-white disabled:opacity-50 ${fg}`}
+      >
+        {action}
+      </button>
+    </section>
   );
 }

@@ -103,6 +103,23 @@ export interface PracticeSession {
   pendingSync: 0 | 1;
 }
 
+/** A practice round paused mid-way, to be resumed later. */
+export interface SavedPractice {
+  id: string;
+  userId: string;
+  name: string;
+  round: {
+    title: string;
+    settings: PracticeSettings;
+    items: { questionId: string; optionOrder: number[] }[];
+    startedAt: number;
+  };
+  /** questionId → chosen original option index. */
+  answers: Record<string, number>;
+  index: number;
+  savedAt: number;
+}
+
 export type ExamMode = 'practice' | 'final';
 
 /** How a mix of questionnaires splits the total: evenly, by questionnaire size, or hand-picked counts. */
@@ -142,6 +159,7 @@ export const db = new Dexie('exam-sim') as Dexie & {
   media: EntityTable<MediaFile, 'id'>;
   favorites: Table<Favorite, [string, string]>;
   practiceSessions: EntityTable<PracticeSession, 'id'>;
+  savedPractices: EntityTable<SavedPractice, 'id'>;
 };
 
 db.version(1).stores({
@@ -225,3 +243,7 @@ db.version(4)
       await tx.table('exams').put(e);
     }
   });
+
+db.version(5).stores({
+  savedPractices: 'id, userId, savedAt',
+});

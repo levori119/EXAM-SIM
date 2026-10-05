@@ -1,9 +1,11 @@
 import { db, type PracticeSettings, type Question, type SetQuota } from '../db/db';
 import { pickQuestions } from './composition';
+import { commonMistakeIds } from './stats';
 
 export type PracticeSource =
   | { kind: 'mix'; quotas: SetQuota[] }
   | { kind: 'favorites' }
+  | { kind: 'mistakes' }
   | { kind: 'exam'; examId: string }
   | { kind: 'ids'; ids: string[] };
 
@@ -45,6 +47,8 @@ export async function loadSourceQuestions(source: PracticeSource, userId: string
       const favs = await db.favorites.where('userId').equals(userId).sortBy('createdAt');
       return (await db.questions.bulkGet(favs.map((f) => f.questionId))).filter(answerable);
     }
+    case 'mistakes':
+      return (await db.questions.bulkGet(await commonMistakeIds(userId))).filter(answerable);
     case 'exam': {
       const exam = await db.exams.get(source.examId);
       return exam ? pickQuestions(exam.composition) : [];
@@ -101,4 +105,52 @@ export async function savePracticeSession(userId: string, round: PracticeRound, 
     finishedAt: Date.now(),
     pendingSync: 1,
   });
+}
+
+const savedNameFormat = new Intl.DateTimeFormat('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+
+/** Default name for a saved practice: the questionnaire name plus date and time. */
+export const defaultSavedName = (round: PracticeRound) => `${round.title} ${savedNameFormat.format(Date.now())}`;
+
+/** Saves (or overwrites) an in-progress round so it can be resumed later. Returns its id. */
+export async function savePracticeProgress(
+  id: string | null,
+  userId: string,
+  name: string,
+  round: PracticeRound,
+  answers: Answers,
+  index: number,
+): Promise<string> {
+  const savedId = id ?? crypto.randomUUID();
+  await db.savedPractices.put({
+    id: savedId,
+    userId,
+    name: name.trim() || defaultSavedName(round),
+    round: { title: round.title, settings: round.settings, items: round.items, startedAt: round.startedAt },
+    answers,
+    index,
+    savedAt: Date.now(),
+  });
+  return savedId;
+}
+
+export async function deleteSavedPractice(id: string): Promise<void> {
+  await db.savedPractices.delete(id);
+}
+
+/** Loads a saved round; questions deleted since are dropped. */
+export async function loadSavedPractice(id: string) {
+  const saved = await db.savedPractices.get(id);
+  if (!saved) return null;
+  const qs = (await db.questions.bulkGet(saved.round.items.map((i) => i.questionId))).filter(answerable);
+  const questions = new Map(qs.map((q) => [q.id, q]));
+  const items = saved.round.items.filter((i) => questions.has(i.questionId));
+  if (!items.length) return null;
+  return {
+    saved,
+    round: { ...saved.round, items } as PracticeRound,
+    questions,
+    answers: Object.fromEntries(Object.entries(saved.answers).filter(([qid]) => questions.has(qid))) as Answers,
+    index: Math.min(saved.index, items.length - 1),
+  };
 }
