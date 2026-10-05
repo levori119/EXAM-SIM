@@ -1,4 +1,4 @@
-import Dexie, { type EntityTable } from 'dexie';
+import Dexie, { type EntityTable, type Table } from 'dexie';
 
 export type UserRole = 'admin' | 'examinee';
 
@@ -41,8 +41,48 @@ export interface Question {
   topic: string;
   difficulty: Difficulty;
   explanation: string;
+  /** Attached diagrams/figures, ids into `media`. */
+  imageIds: string[];
   createdAt: number;
   updatedAt: number;
+  pendingSync: 0 | 1;
+}
+
+/** A compressed image (diagram, figure) that questions can reference. */
+export interface MediaFile {
+  id: string;
+  documentId: string | null;
+  name: string;
+  mimeType: string;
+  blob: Blob;
+  createdAt: number;
+}
+
+export interface Favorite {
+  userId: string;
+  questionId: string;
+  createdAt: number;
+}
+
+export type RevealMode = 'immediate' | 'end';
+
+export interface PracticeSettings {
+  shuffleQuestions: boolean;
+  shuffleOptions: boolean;
+  reveal: RevealMode;
+}
+
+export interface PracticeSession {
+  id: string;
+  userId: string;
+  title: string;
+  settings: PracticeSettings;
+  questionIds: string[];
+  /** questionId → chosen option index (in the question's original option order), null = skipped. */
+  answers: Record<string, number | null>;
+  correctCount: number;
+  startedAt: number;
+  finishedAt: number;
   pendingSync: 0 | 1;
 }
 
@@ -72,6 +112,9 @@ export const db = new Dexie('exam-sim') as Dexie & {
   documents: EntityTable<SourceDocument, 'id'>;
   questions: EntityTable<Question, 'id'>;
   exams: EntityTable<Exam, 'id'>;
+  media: EntityTable<MediaFile, 'id'>;
+  favorites: Table<Favorite, [string, string]>;
+  practiceSessions: EntityTable<PracticeSession, 'id'>;
 };
 
 db.version(1).stores({
@@ -83,3 +126,18 @@ db.version(2).stores({
   questions: 'id, documentId, topic, createdAt, pendingSync',
   exams: 'id, published, createdAt, pendingSync',
 });
+
+db.version(3)
+  .stores({
+    media: 'id, documentId',
+    favorites: '[userId+questionId], userId',
+    practiceSessions: 'id, userId, finishedAt, pendingSync',
+  })
+  .upgrade((tx) =>
+    tx
+      .table('questions')
+      .toCollection()
+      .modify((q: Partial<Question>) => {
+        q.imageIds ??= [];
+      }),
+  );

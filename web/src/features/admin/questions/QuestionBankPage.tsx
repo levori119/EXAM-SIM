@@ -2,9 +2,9 @@ import { useRef, useState, type DragEvent } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { FileText, FileUp, Image as ImageIcon, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { db, type Question, type SourceDocument } from '../../../db/db';
-import { extractText } from '../../../ingest/extractText';
-import { parseQuestions } from '../../../ingest/parseQuestions';
+import { addFilesToUpload, EMPTY_UPLOAD, type UploadResult } from '../../../ingest/buildUpload';
 import {
+  addMedia,
   addQuestion,
   deleteDocument,
   deleteQuestion,
@@ -20,13 +20,12 @@ import { EmptyState, PageHeader } from '../../../components/PageHeader';
 import { IconButton } from '../../../components/IconButton';
 import { Button, ErrorText, inputClass } from '../../../components/fields';
 import { QuestionEditor, TopicsDatalist } from './QuestionEditor';
-import { UploadReviewDialog, type UploadResult } from './UploadReviewDialog';
+import { UPLOAD_ACCEPT, UploadReviewDialog } from './UploadReviewDialog';
 
-const ACCEPT = '.pdf,.txt,.md,application/pdf,text/plain,image/*';
 const sizeFormat = (bytes: number) => (bytes > 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.ceil(bytes / 1e3)} KB`);
 const dateFormat = new Intl.DateTimeFormat('he-IL', { dateStyle: 'short' });
 
-type Editing = { id: string | null; draft: QuestionDraft } | null;
+type Editing = { id: string | null; documentId: string | null; draft: QuestionDraft } | null;
 type Deleting = { kind: 'question'; question: Question } | { kind: 'document'; doc: SourceDocument } | null;
 
 export function QuestionBankPage() {
@@ -44,27 +43,13 @@ export function QuestionBankPage() {
   const [topicFilter, setTopicFilter] = useState('');
   const [onlyUnanswered, setOnlyUnanswered] = useState(false);
 
-  const handleFile = async (file: File) => {
+  const handleFiles = async (files: File[]) => {
     setUploadError(null);
-    setProcessing(file.name);
+    setProcessing(files.length === 1 ? files[0].name : `${files.length} קבצים`);
     try {
-      const text = await extractText(file);
-      if (text === null) {
-        setUpload({ file, drafts: [], notice: 'זיהוי שאלות מתמונות (OCR) עדיין לא נתמך. ניתן לשמור את הקובץ ולהוסיף שאלות ידנית.' });
-        return;
-      }
-      const parsed = parseQuestions(text);
-      setUpload({
-        file,
-        drafts: parsed.map((p) => ({ ...emptyDraft(), text: p.text, options: p.options, correctIndex: p.correctIndex })),
-        notice: parsed.length
-          ? null
-          : text.trim()
-            ? 'לא זוהו שאלות בפורמט ממוספר (1. שאלה / א. תשובה). ניתן להוסיף שאלות ידנית.'
-            : 'לא נמצא טקסט בקובץ — ייתכן שזהו PDF סרוק. ניתן להוסיף שאלות ידנית.',
-      });
+      setUpload(await addFilesToUpload(EMPTY_UPLOAD, files));
     } catch (err) {
-      setUploadError(`קריאת הקובץ נכשלה: ${err instanceof Error ? err.message : String(err)}`);
+      setUploadError(`קריאת הקבצים נכשלה: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setProcessing(null);
     }
@@ -82,16 +67,16 @@ export function QuestionBankPage() {
     <>
       <PageHeader
         title="טעינת שאלות ובנק שאלות"
-        subtitle="העלו קובץ PDF או טקסט — המערכת תזהה שאלות, תשובות ומפתח תשובות"
+        subtitle="העלו קובץ שאלות (PDF / טקסט), ואם יש — גם תמונות וקובץ מפתח תשובות נפרד"
         actions={
-          <Button variant="secondary" onClick={() => setEditing({ id: null, draft: emptyDraft(topicFilter) })}>
+          <Button variant="secondary" onClick={() => setEditing({ id: null, documentId: null, draft: emptyDraft(topicFilter) })}>
             <Plus className="h-5 w-5" /> שאלה ידנית
           </Button>
         }
       />
       <TopicsDatalist topics={topics} />
 
-      <UploadZone processing={processing} onFile={handleFile} />
+      <UploadZone processing={processing} onFiles={handleFiles} />
       <div className="mt-2">
         <ErrorText message={uploadError} />
       </div>
@@ -157,6 +142,7 @@ export function QuestionBankPage() {
                       <Chip>{question.topic}</Chip>
                       <Chip>{DIFFICULTY_LABELS[question.difficulty]}</Chip>
                       <Chip>{question.options.length} תשובות</Chip>
+                      {question.imageIds?.length > 0 && <Chip>🖼 {question.imageIds.length}</Chip>}
                       {question.correctIndex === null ? (
                         <Chip tone="warn">חסרה תשובה נכונה</Chip>
                       ) : (
@@ -166,7 +152,7 @@ export function QuestionBankPage() {
                       )}
                     </div>
                   </div>
-                  <IconButton label="עריכה" onClick={() => setEditing({ id: question.id, draft: toDraft(question) })}>
+                  <IconButton label="עריכה" onClick={() => setEditing({ id: question.id, documentId: question.documentId, draft: toDraft(question) })}>
                     <Pencil className="h-5 w-5" />
                   </IconButton>
                   <IconButton label="מחיקה" danger onClick={() => setDeleting({ kind: 'question', question })}>
@@ -180,7 +166,7 @@ export function QuestionBankPage() {
         )}
       </section>
 
-      <UploadReviewDialog result={upload} onClose={() => setUpload(null)} />
+      <UploadReviewDialog initial={upload} onClose={() => setUpload(null)} />
       <QuestionDialog editing={editing} onChange={setEditing} />
       <ConfirmDialog
         open={!!deleting}
@@ -213,15 +199,14 @@ function Chip({ children, tone }: { children: React.ReactNode; tone?: 'ok' | 'wa
   return <span className={`max-w-60 rounded-full px-2.5 py-1 ${toneClass}`}>{children}</span>;
 }
 
-function UploadZone({ processing, onFile }: { processing: string | null; onFile: (file: File) => void }) {
+function UploadZone({ processing, onFiles }: { processing: string | null; onFiles: (files: File[]) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
 
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
     setDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) onFile(file);
+    if (e.dataTransfer.files.length) onFiles([...e.dataTransfer.files]);
   };
 
   return (
@@ -249,21 +234,24 @@ function UploadZone({ processing, onFile }: { processing: string | null; onFile:
             <FileUp className="h-7 w-7" />
           </div>
           <div>
-            <p className="font-semibold">גררו לכאן קובץ שאלות</p>
-            <p className="text-sm text-slate-500 dark:text-slate-400">PDF, טקסט או תמונה</p>
+            <p className="font-semibold">גררו לכאן קבצים</p>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              קובץ שאלות (PDF / טקסט) + תמונות ותרשימים + קובץ מפתח תשובות — אפשר כמה יחד
+            </p>
           </div>
           <Button variant="primary" onClick={() => inputRef.current?.click()}>
-            בחירת קובץ
+            בחירת קבצים
           </Button>
           <input
             ref={inputRef}
             type="file"
-            accept={ACCEPT}
+            multiple
+            accept={UPLOAD_ACCEPT}
             className="hidden"
             onChange={(e) => {
-              const file = e.target.files?.[0];
+              const files = [...(e.target.files ?? [])];
               e.target.value = '';
-              if (file) onFile(file);
+              if (files.length) onFiles(files);
             }}
           />
         </>
@@ -273,6 +261,18 @@ function UploadZone({ processing, onFile }: { processing: string | null; onFile:
 }
 
 function QuestionDialog({ editing, onChange }: { editing: Editing; onChange: (e: Editing) => void }) {
+  const documentId = editing?.documentId ?? null;
+  const attachedKey = editing?.draft.imageIds.join(',') ?? '';
+  // Images from the same source upload, plus whatever is attached already.
+  const pool = useLiveQuery(async () => {
+    if (!editing) return [];
+    const [fromDoc, attached] = await Promise.all([
+      documentId ? db.media.where('documentId').equals(documentId).toArray() : [],
+      db.media.bulkGet(editing.draft.imageIds),
+    ]);
+    const all = new Map([...fromDoc, ...attached.filter((m) => !!m)].map((m) => [m.id, m]));
+    return [...all.values()];
+  }, [!!editing, documentId, attachedKey]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const close = () => {
@@ -317,7 +317,12 @@ function QuestionDialog({ editing, onChange }: { editing: Editing; onChange: (e:
       }
     >
       {editing && (
-        <QuestionEditor idPrefix="edit" draft={editing.draft} onChange={(draft) => onChange({ ...editing, draft })} />
+        <QuestionEditor
+          idPrefix="edit"
+          draft={editing.draft}
+          media={{ pool: pool ?? [], onUpload: (file) => addMedia(file, documentId) }}
+          onChange={(draft) => onChange({ ...editing, draft })}
+        />
       )}
       <div className="mt-4">
         <ErrorText message={error} />

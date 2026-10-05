@@ -2,6 +2,7 @@ import { Check, Plus, X } from 'lucide-react';
 import type { Difficulty } from '../../../db/db';
 import { DIFFICULTY_LABELS, type QuestionDraft } from '../../../services/questionBank';
 import { inputClass } from '../../../components/fields';
+import { ImageAttachments, type MediaItem } from '../../../components/media';
 
 const OPTION_LETTERS = 'אבגדהוזח';
 export const MAX_OPTIONS = OPTION_LETTERS.length;
@@ -13,9 +14,10 @@ interface Props {
   /** Hides explanation & difficulty to keep the bulk-review list compact. */
   compact?: boolean;
   idPrefix: string;
+  media?: { pool: MediaItem[]; onUpload?: (file: File) => Promise<string> };
 }
 
-export function QuestionEditor({ draft, onChange, compact, idPrefix }: Props) {
+export function QuestionEditor({ draft, onChange, compact, idPrefix, media }: Props) {
   const set = <K extends keyof QuestionDraft>(key: K, value: QuestionDraft[K]) => onChange({ ...draft, [key]: value });
 
   const setOption = (index: number, value: string) =>
@@ -88,6 +90,15 @@ export function QuestionEditor({ draft, onChange, compact, idPrefix }: Props) {
           </button>
         )}
       </fieldset>
+
+      {media && (media.pool.length > 0 || media.onUpload || draft.imageIds.length > 0) && (
+        <ImageAttachments
+          imageIds={draft.imageIds}
+          pool={media.pool}
+          onUpload={media.onUpload}
+          onChange={(imageIds) => set('imageIds', imageIds)}
+        />
+      )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block space-y-1.5" htmlFor={`${idPrefix}-topic`}>

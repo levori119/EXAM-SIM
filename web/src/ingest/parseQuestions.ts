@@ -11,7 +11,8 @@ const LATIN_LETTERS = 'abcdef';
 const QUESTION_RE = /^\s*(?:שאלה\s*(?:מס['׳]?\s*)?|Q(?:uestion)?\s*)?(\d{1,3})\s*[.):\-]\s*(.*)$/i;
 const OPTION_RE = /^\s*\(?([א-ו]|[a-fA-F])\s*[.)'׳]\s*(.*)$/;
 const ANSWER_KEY_HEADER_RE = /^\s*(מפתח(?:\s+תשובות)?|תשובות(?:\s+נכונות)?|answer\s*key|answers)\s*:?\s*$/i;
-const ANSWER_PAIR_RE = /(\d{1,3})\s*[.):\-]\s*\(?([א-ו]|[a-fA-F])(?![א-ת\w])/g;
+// Separator optional so table-style keys ("1  ב") work too.
+const ANSWER_PAIR_RE = /(\d{1,3})\s*[.):\-]?\s*\(?([א-ו]|[a-fA-F])(?![א-ת\w])/g;
 const CORRECT_MARK_RE = /^\s*[*✓✔]\s*|\s*[*✓✔]\s*$|\s*\((?:נכון|correct)\)\s*$/i;
 
 function letterToIndex(letter: string): number {
@@ -43,9 +44,7 @@ export function parseQuestions(text: string): ParsedQuestion[] {
       continue;
     }
     if (inAnswerKey) {
-      for (const [, num, letter] of line.matchAll(ANSWER_PAIR_RE)) {
-        answerKey.set(Number(num), letterToIndex(letter));
-      }
+      for (const [num, index] of parseAnswerKey(line)) answerKey.set(num, index);
       continue;
     }
 
@@ -81,4 +80,13 @@ export function parseQuestions(text: string): ParsedQuestion[] {
 
   // Drop numbered lines that were not really questions (no options).
   return questions.filter((q) => q.text && q.options.length >= 2);
+}
+
+/** Reads "question number → option index" pairs from an answer-key text (a separate file or section). */
+export function parseAnswerKey(text: string): Map<number, number> {
+  const key = new Map<number, number>();
+  for (const [, num, letter] of text.matchAll(ANSWER_PAIR_RE)) {
+    key.set(Number(num), letterToIndex(letter));
+  }
+  return key;
 }

@@ -1,4 +1,6 @@
 import { db, type Difficulty, type Question } from '../db/db';
+import type { UploadResult } from '../ingest/buildUpload';
+import { compressImage } from '../ingest/images';
 
 export interface QuestionDraft {
   text: string;
@@ -7,6 +9,7 @@ export interface QuestionDraft {
   topic: string;
   difficulty: Difficulty;
   explanation: string;
+  imageIds: string[];
 }
 
 export const DIFFICULTY_LABELS: Record<Difficulty, string> = {
@@ -18,7 +21,7 @@ export const DIFFICULTY_LABELS: Record<Difficulty, string> = {
 export const UNCATEGORIZED = 'כללי';
 
 export function emptyDraft(topic = ''): QuestionDraft {
-  return { text: '', options: ['', '', '', ''], correctIndex: null, topic, difficulty: 'medium', explanation: '' };
+  return { text: '', options: ['', '', '', ''], correctIndex: null, topic, difficulty: 'medium', explanation: '', imageIds: [] };
 }
 
 /** Returns an error message, or null if the draft can be saved. */
@@ -41,38 +44,58 @@ function normalize(draft: QuestionDraft) {
     topic: draft.topic.trim() || UNCATEGORIZED,
     difficulty: draft.difficulty,
     explanation: draft.explanation.trim(),
+    imageIds: [...new Set(draft.imageIds)],
   };
 }
 
-export async function saveDocumentWithQuestions(
-  file: File,
-  uploadedBy: string,
-  drafts: QuestionDraft[],
-): Promise<void> {
+/** Saves a reviewed upload: source documents, compressed images and questions, atomically. */
+export async function saveUpload(upload: UploadResult, uploadedBy: string): Promise<void> {
   const now = Date.now();
-  const documentId = crypto.randomUUID();
-  await db.transaction('rw', db.documents, db.questions, async () => {
-    await db.documents.add({
-      id: documentId,
-      name: file.name,
-      mimeType: file.type,
-      size: file.size,
-      blob: file,
-      uploadedBy,
-      createdAt: now,
-      questionCount: drafts.length,
-    });
+  const docs = upload.files.map(({ file, role }) => ({ id: crypto.randomUUID(), file, role }));
+  const primaryId = (docs.find((d) => d.role === 'questions') ?? docs[0])?.id ?? null;
+
+  await db.transaction('rw', db.documents, db.questions, db.media, async () => {
+    await db.documents.bulkAdd(
+      docs.map(({ id, file }) => ({
+        id,
+        name: file.name,
+        mimeType: file.type,
+        size: file.size,
+        blob: file,
+        uploadedBy,
+        createdAt: now,
+        questionCount: id === primaryId ? upload.items.length : 0,
+      })),
+    );
+    await db.media.bulkAdd(
+      upload.media.map((m) => ({
+        id: m.id,
+        documentId: primaryId,
+        name: m.name,
+        mimeType: m.blob.type,
+        blob: m.blob,
+        createdAt: now,
+      })),
+    );
     await db.questions.bulkAdd(
-      drafts.map((d) => ({
+      upload.items.map(({ draft }) => ({
         id: crypto.randomUUID(),
-        documentId,
-        ...normalize(d),
+        documentId: primaryId,
+        ...normalize(draft),
         createdAt: now,
         updatedAt: now,
         pendingSync: 1 as const,
       })),
     );
   });
+}
+
+/** Stores a single image added from the question editor; returns its media id. */
+export async function addMedia(file: File, documentId: string | null): Promise<string> {
+  const id = crypto.randomUUID();
+  const blob = await compressImage(file);
+  await db.media.add({ id, documentId, name: file.name, mimeType: blob.type, blob, createdAt: Date.now() });
+  return id;
 }
 
 export async function addQuestion(draft: QuestionDraft): Promise<void> {
@@ -96,9 +119,14 @@ export async function deleteQuestion(id: string): Promise<void> {
 }
 
 export async function deleteDocument(id: string, withQuestions: boolean): Promise<void> {
-  await db.transaction('rw', db.documents, db.questions, async () => {
-    if (withQuestions) await db.questions.where('documentId').equals(id).delete();
-    else await db.questions.where('documentId').equals(id).modify({ documentId: null });
+  await db.transaction('rw', db.documents, db.questions, db.media, async () => {
+    if (withQuestions) {
+      await db.questions.where('documentId').equals(id).delete();
+      await db.media.where('documentId').equals(id).delete();
+    } else {
+      await db.questions.where('documentId').equals(id).modify({ documentId: null });
+      await db.media.where('documentId').equals(id).modify({ documentId: null });
+    }
     await db.documents.delete(id);
   });
 }
@@ -121,5 +149,6 @@ export function toDraft(q: Question): QuestionDraft {
     topic: q.topic,
     difficulty: q.difficulty,
     explanation: q.explanation,
+    imageIds: [...(q.imageIds ?? [])],
   };
 }

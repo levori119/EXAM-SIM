@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ClipboardList, FileUp, GraduationCap, LayoutDashboard, LogOut, Users } from 'lucide-react';
+import { BookOpenCheck, ClipboardList, FileUp, GraduationCap, LayoutDashboard, LogOut, Users } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { Avatar } from '../../components/Avatar';
 import { OnlineBadge } from '../../components/OnlineBadge';
@@ -8,14 +8,16 @@ import { AdminOverview } from './AdminOverview';
 import { QuestionBankPage } from './questions/QuestionBankPage';
 import { ExamsPage } from './exams/ExamsPage';
 import { UsersPage } from './users/UsersPage';
+import { PracticeArea } from '../practice/PracticeArea';
 
-export type AdminSection = 'overview' | 'questions' | 'exams' | 'users';
+export type AdminSection = 'overview' | 'questions' | 'exams' | 'users' | 'practice';
 
 const NAV: { id: AdminSection; label: string; icon: ComponentType<{ className?: string }> }[] = [
   { id: 'overview', label: 'סקירה', icon: LayoutDashboard },
   { id: 'questions', label: 'טעינת שאלות', icon: FileUp },
   { id: 'exams', label: 'מבחנים', icon: ClipboardList },
   { id: 'users', label: 'משתמשים', icon: Users },
+  { id: 'practice', label: 'תרגול', icon: BookOpenCheck },
 ];
 
 const isSection = (value: string): value is AdminSection => NAV.some((n) => n.id === value);
@@ -115,12 +117,13 @@ export function AdminLayout() {
             {section === 'questions' && <QuestionBankPage />}
             {section === 'exams' && <ExamsPage />}
             {section === 'users' && <UsersPage />}
+            {section === 'practice' && <PracticeArea />}
           </motion.div>
         </AnimatePresence>
       </main>
 
       {/* Bottom tabs: mobile */}
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden dark:border-slate-800 dark:bg-slate-900/95">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden dark:border-slate-800 dark:bg-slate-900/95">
         {NAV.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
