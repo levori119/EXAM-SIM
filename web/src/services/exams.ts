@@ -46,7 +46,7 @@ export function validateExam(draft: ExamDraft, available: Map<string, number>, s
   return null;
 }
 
-export async function saveExam(id: string | null, draft: ExamDraft, userId: string): Promise<void> {
+export async function saveExam(id: string | null, draft: ExamDraft, userId: string, courseId: string): Promise<void> {
   const now = Date.now();
   const composition = draft.composition.filter((c) => c.count > 0);
   const data = {
@@ -59,7 +59,7 @@ export async function saveExam(id: string | null, draft: ExamDraft, userId: stri
   if (id) {
     await db.exams.update(id, { ...data, updatedAt: now, pendingSync: 1 });
   } else {
-    await db.exams.add({ id: crypto.randomUUID(), ...data, createdBy: userId, createdAt: now, updatedAt: now, pendingSync: 1 });
+    await db.exams.add({ id: crypto.randomUUID(), courseId, ...data, createdBy: userId, createdAt: now, updatedAt: now, pendingSync: 1 });
   }
 }
 

@@ -18,6 +18,8 @@ import { EmptyState, PageHeader } from '../../../components/PageHeader';
 import { IconButton } from '../../../components/IconButton';
 import { QuestionMixPicker, useMixSets } from '../../../components/QuestionMixPicker';
 import { Button, ErrorText, inputClass, TextAreaField, TextField, Toggle } from '../../../components/fields';
+import { useCourse } from '../../../courses/CourseContext';
+import { NoCourse } from '../courses/NoCourse';
 
 type Editing = { id: string | null; draft: ExamDraft } | null;
 
@@ -35,18 +37,23 @@ const toDraft = ({ title, description, mode, durationMinutes, questionCount, com
 });
 
 export function ExamsPage() {
-  const exams = useLiveQuery(() => db.exams.orderBy('createdAt').reverse().toArray());
-  const counts = useLiveQuery(answerableCounts) ?? new Map<string, number>();
-  const setNames = new Map((useLiveQuery(() => db.questionSets.toArray()) ?? []).map((s) => [s.id, s.name]));
+  const { courseId, course } = useCourse();
+  const exams = useLiveQuery(() => db.exams.where('courseId').equals(courseId ?? '').reverse().sortBy('createdAt'), [courseId]);
+  const courseSets = useLiveQuery(() => db.questionSets.where('courseId').equals(courseId ?? '').toArray(), [courseId]) ?? [];
+  const allCounts = useLiveQuery(answerableCounts) ?? new Map<string, number>();
+  // Only this course's questionnaires.
+  const counts = new Map([...allCounts].filter(([setId]) => courseSets.some((s) => s.id === setId)));
+  const setNames = new Map(courseSets.map((s) => [s.id, s.name]));
   const [editing, setEditing] = useState<Editing>(null);
   const [deleting, setDeleting] = useState<Exam | null>(null);
 
   const totalReady = [...counts.values()].reduce((a, b) => a + b, 0);
+  if (!course) return <NoCourse />;
 
   return (
     <>
       <PageHeader
-        title="יצירת וניהול מבחנים"
+        title={`מבחנים — ${course.name}`}
         subtitle={`${totalReady} שאלות מוכנות ב-${counts.size} שאלונים`}
         actions={
           <Button variant="primary" onClick={() => setEditing({ id: null, draft: emptyExamDraft() })}>
@@ -162,6 +169,7 @@ export function ExamsPage() {
 
 function ExamDialog({ editing, onChange }: { editing: Editing; onChange: (e: Editing) => void }) {
   const { user } = useAuth();
+  const { courseId } = useCourse();
   const sets = useMixSets() ?? [];
   const [mix, setMix] = useState<MixValue>({ setIds: [], distribution: 'proportional', total: 10, custom: {} });
   const [busy, setBusy] = useState(false);
@@ -204,10 +212,10 @@ function ExamDialog({ editing, onChange }: { editing: Editing; onChange: (e: Edi
       setError(problem);
       return;
     }
-    if (!user) return;
+    if (!user || !courseId) return;
     setBusy(true);
     try {
-      await saveExam(editing.id, draft, user.id);
+      await saveExam(editing.id, draft, user.id, courseId);
       onChange(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'השמירה נכשלה.');

@@ -4,6 +4,7 @@ import './index.css';
 import { App } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider } from './auth/AuthContext';
+import { CourseProvider } from './courses/CourseContext';
 
 // Follow the OS colour scheme until a user preference exists.
 const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -15,7 +16,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
       <AuthProvider>
-        <App />
+        <CourseProvider>
+          <App />
+        </CourseProvider>
       </AuthProvider>
     </ErrorBoundary>
   </StrictMode>,

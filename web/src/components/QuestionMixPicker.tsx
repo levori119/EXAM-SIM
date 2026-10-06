@@ -10,6 +10,7 @@ import {
   type MixValue,
 } from '../services/composition';
 import { inputClass } from './fields';
+import { useCourse } from '../courses/CourseContext';
 
 export interface MixSet {
   id: string;
@@ -17,15 +18,16 @@ export interface MixSet {
   available: number;
 }
 
-/** Questionnaires that have at least one answerable question (live). undefined while loading. */
+/** The course's questionnaires that have at least one answerable question (live). undefined while loading. */
 export function useMixSets(): MixSet[] | undefined {
+  const { courseId } = useCourse();
   return useLiveQuery(async () => {
-    const [sets, counts] = await Promise.all([db.questionSets.toArray(), answerableCounts()]);
+    const [sets, counts] = await Promise.all([db.questionSets.where('courseId').equals(courseId ?? '').toArray(), answerableCounts()]);
     return sets
       .map((s) => ({ id: s.id, name: s.name, available: counts.get(s.id) ?? 0 }))
       .filter((s) => s.available > 0)
       .sort((a, b) => a.name.localeCompare(b.name, 'he'));
-  });
+  }, [courseId]);
 }
 
 const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#14b8a6', '#ef4444'];

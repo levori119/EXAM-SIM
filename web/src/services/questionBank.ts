@@ -75,9 +75,9 @@ async function crossLinks(setId: string, upload: UploadResult) {
  * A pictures-only upload belongs with the questions that reference it: finds the questionnaire
  * whose questions mention the most of these pictures ("picture 36" ↔ "תמונה 36").
  */
-export async function suggestSetForMedia(upload: UploadResult): Promise<{ name: string; questions: number } | null> {
+export async function suggestSetForMedia(upload: UploadResult, courseId: string): Promise<{ name: string; questions: number } | null> {
   if (!upload.media.length || upload.items.length) return null;
-  const [sets, questions] = await Promise.all([db.questionSets.toArray(), db.questions.toArray()]);
+  const [sets, questions] = await Promise.all([db.questionSets.where('courseId').equals(courseId).toArray(), db.questions.toArray()]);
   let best: { name: string; questions: number } | null = null;
   for (const set of sets) {
     const qs = questions.filter((q) => q.setId === set.id);
@@ -92,8 +92,8 @@ export async function suggestSetForMedia(upload: UploadResult): Promise<{ name: 
 }
 
 /** For the review screen: how many links to an existing questionnaire's content saving will add. */
-export async function previewCrossLinks(setName: string, upload: UploadResult): Promise<number> {
-  const set = await findSetByName(setName);
+export async function previewCrossLinks(setName: string, courseId: string, upload: UploadResult): Promise<number> {
+  const set = await findSetByName(setName, courseId);
   if (!set) return 0;
   const { savedUpdates, newItemExtras } = await crossLinks(set.id, upload);
   return savedUpdates.reduce((s, u) => s + u.add.length, 0) + newItemExtras.reduce((s, x) => s + x.length, 0);
@@ -104,8 +104,8 @@ export async function previewCrossLinks(setName: string, upload: UploadResult): 
  * source documents, compressed images and questions, atomically — and links pictures
  * to questions already saved in that questionnaire.
  */
-export async function saveUpload(upload: UploadResult, setName: string, uploadedBy: string): Promise<string> {
-  const setId = await findOrCreateSet(setName, uploadedBy);
+export async function saveUpload(upload: UploadResult, setName: string, courseId: string, uploadedBy: string): Promise<string> {
+  const setId = await findOrCreateSet(setName, courseId, uploadedBy);
   const { savedUpdates, newItemExtras } = await crossLinks(setId, upload);
   const now = Date.now();
   const docs = upload.files.map(({ file, role }) => ({ id: crypto.randomUUID(), file, role }));

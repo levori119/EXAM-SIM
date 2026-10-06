@@ -20,6 +20,8 @@ import { EmptyState, PageHeader } from '../../../components/PageHeader';
 import { IconButton } from '../../../components/IconButton';
 import { Button, ErrorText, inputClass, SelectField, TextField } from '../../../components/fields';
 import { QuestionEditor } from './QuestionEditor';
+import { useCourse } from '../../../courses/CourseContext';
+import { NoCourse } from '../courses/NoCourse';
 import { UPLOAD_ACCEPT, UploadReviewDialog } from './UploadReviewDialog';
 
 type Editing = { id: string | null; setId: string; draft: QuestionDraft } | null;
@@ -27,8 +29,12 @@ type Deleting = { kind: 'question'; question: Question } | { kind: 'set'; set: S
 type PendingUpload = { result: UploadResult; setName?: string } | null;
 
 export function QuestionBankPage() {
-  const sets = useLiveQuery(listSetSummaries);
-  const questions = useLiveQuery(() => db.questions.orderBy('createdAt').toArray());
+  const { courseId, course } = useCourse();
+  const sets = useLiveQuery(() => listSetSummaries(courseId ?? ''), [courseId]);
+  const questions = useLiveQuery(async () => {
+    const setIds = await db.questionSets.where('courseId').equals(courseId ?? '').primaryKeys();
+    return db.questions.where('setId').anyOf(setIds).sortBy('createdAt');
+  }, [courseId]);
   const setNames = new Map((sets ?? []).map((s) => [s.id, s.name]));
 
   const [upload, setUpload] = useState<PendingUpload>(null);
@@ -73,6 +79,8 @@ export function QuestionBankPage() {
     questionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  if (!course) return <NoCourse />;
+
   const q = query.trim().toLowerCase();
   const visible = (questions ?? []).filter(
     (x) =>
@@ -84,8 +92,8 @@ export function QuestionBankPage() {
   return (
     <>
       <PageHeader
-        title="שאלונים ובנק שאלות"
-        subtitle="כל העלאה (שאלות + מפתח תשובות + איורים) נשמרת כשאלון בעל שם — נושא נפרד שאפשר לשלב במבחנים ובתרגולים"
+        title={`שאלונים — ${course.name}`}
+        subtitle="כל העלאה (שאלות + מפתח תשובות + איורים) נשמרת כשאלון בעל שם בקורס הזה — נושא נפרד שאפשר לשלב במבחנים ובתרגולים"
         actions={
           sets?.length ? (
             <Button onClick={() => setEditing({ id: null, setId: setFilter || sets[0].id, draft: emptyDraft() })}>

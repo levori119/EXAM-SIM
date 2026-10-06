@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, BookOpenCheck, ClipboardList, FolderOpen, Layers, Play, RotateCcw, Star, Trash2 } from 'lucide-react';
+import { BarChart3, BookOpenCheck, ClipboardList, FolderOpen, Layers, Library, Play, RotateCcw, Star, Trash2 } from 'lucide-react';
+import { MaterialsPage } from '../materials/MaterialsPage';
 import { db, type PracticeSettings, type Question } from '../../db/db';
 import { useAuth } from '../../auth/AuthContext';
 import { pickQuestions, type MixValue } from '../../services/composition';
@@ -17,7 +18,8 @@ import {
   type PracticeRound,
   type PracticeSource,
 } from '../../services/practice';
-import { commonMistakeIds } from '../../services/stats';
+import { commonMistakeIds, courseQuestionIds } from '../../services/stats';
+import { useCourse } from '../../courses/CourseContext';
 import { EmptyState, PageHeader } from '../../components/PageHeader';
 import { useMixSets } from '../../components/QuestionMixPicker';
 import { IconButton } from '../../components/IconButton';
@@ -44,7 +46,7 @@ type Phase =
   | Running
   | { kind: 'summary'; round: PracticeRound; questions: Map<string, Question>; answers: Answers };
 
-type Tab = 'practice' | 'stats';
+type Tab = 'practice' | 'materials' | 'stats';
 
 const dateFormat = new Intl.DateTimeFormat('he-IL', { dateStyle: 'short', timeStyle: 'short' });
 
@@ -53,17 +55,25 @@ type FixedDefaults = Partial<PracticeSettings> & { count?: number };
 /** Practice flow: pick questionnaires (or a fixed list) → choose settings → answer → summary → optional retry round. */
 export function PracticeArea() {
   const { user } = useAuth();
+  const { courseId, course } = useCourse();
   const [phase, setPhase] = useState<Phase>({ kind: 'home' });
   const [tab, setTab] = useState<Tab>('practice');
   const [setup, setSetup] = useState<SetupRequest | null>(null);
   const [lastSettings, setLastSettings] = useState<PracticeSettings>(DEFAULT_SETTINGS);
   if (!user) return null;
+  if (!course || !courseId) {
+    return (
+      <EmptyState icon={<BookOpenCheck className="h-10 w-10" />} title="אין עדיין קורסים">
+        {user.role === 'admin' ? 'צרו קורס במסך "קורסים" כדי להתחיל.' : 'מנהל המערכת עדיין לא פתח קורסים.'}
+      </EmptyState>
+    );
+  }
 
   const requestMix = (setIds: string[], total: number) =>
     setSetup({ kind: 'mix', title: '', settings: lastSettings, mix: { setIds, distribution: 'proportional', total, custom: {} } satisfies MixValue });
 
   const requestFixed = async (title: string, source: PracticeSource, defaults?: FixedDefaults) => {
-    const questions = await loadSourceQuestions(source, user.id);
+    const questions = await loadSourceQuestions(source, user.id, courseId);
     setSetup({
       kind: 'fixed',
       title,
@@ -102,14 +112,14 @@ export function PracticeArea() {
 
   const save = async (name: string, answers: Answers, index: number) => {
     if (phase.kind !== 'running') return;
-    const savedId = await savePracticeProgress(phase.savedId ?? null, user.id, name, phase.round, answers, index);
+    const savedId = await savePracticeProgress(phase.savedId ?? null, user.id, courseId, name, phase.round, answers, index);
     setPhase({ ...phase, savedId, savedName: name.trim() || phase.savedName, initialAnswers: answers, initialIndex: index });
   };
 
   const finish = async (answers: Answers) => {
     if (phase.kind !== 'running') return;
     const { correct } = scoreRound(phase.round, answers, phase.questions);
-    await savePracticeSession(user.id, phase.round, answers, correct);
+    await savePracticeSession(user.id, courseId, phase.round, answers, correct);
     // A finished round no longer needs its saved progress.
     if (phase.savedId) await deleteSavedPractice(phase.savedId);
     setPhase({ kind: 'summary', round: phase.round, questions: phase.questions, answers });
@@ -119,10 +129,11 @@ export function PracticeArea() {
     <>
       {phase.kind === 'home' && (
         <>
-          <div className="mb-6 inline-flex rounded-2xl bg-slate-100 p-1 dark:bg-slate-800" role="tablist">
+          <div className="mb-6 flex max-w-full overflow-x-auto rounded-2xl bg-slate-100 p-1 sm:inline-flex dark:bg-slate-800" role="tablist">
             {(
               [
                 ['practice', 'תרגול', BookOpenCheck],
+                ['materials', 'חומרי לימוד', Library],
                 ['stats', 'סטטיסטיקה', BarChart3],
               ] as const
             ).map(([value, label, Icon]) => (
@@ -131,7 +142,7 @@ export function PracticeArea() {
                 role="tab"
                 aria-selected={tab === value}
                 onClick={() => setTab(value)}
-                className={`inline-flex min-h-12 items-center gap-2 rounded-xl px-5 font-semibold transition ${
+                className={`inline-flex min-h-12 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 font-semibold transition sm:flex-none ${
                   tab === value ? 'bg-white shadow dark:bg-slate-900' : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
                 }`}
               >
@@ -140,11 +151,9 @@ export function PracticeArea() {
               </button>
             ))}
           </div>
-          {tab === 'practice' ? (
-            <PracticeHome onMix={requestMix} onFixed={requestFixed} onResume={resume} />
-          ) : (
-            <StatsView onPractice={(title, ids) => requestFixed(title, { kind: 'ids', ids })} />
-          )}
+          {tab === 'practice' && <PracticeHome onMix={requestMix} onFixed={requestFixed} onResume={resume} />}
+          {tab === 'materials' && <MaterialsPage editable={false} />}
+          {tab === 'stats' && <StatsView onPractice={(title, ids) => requestFixed(title, { kind: 'ids', ids })} />}
         </>
       )}
       {phase.kind === 'running' && (
@@ -184,13 +193,24 @@ function PracticeHome({
   onResume: (id: string) => void;
 }) {
   const { user } = useAuth();
+  const { courseId } = useCourse();
   const userId = user?.id ?? '';
+  const cid = courseId ?? '';
   const sets = useMixSets();
-  const favoriteCount = useLiveQuery(() => db.favorites.where('userId').equals(userId).count(), [userId]);
-  const mistakeCount = useLiveQuery(async () => (await commonMistakeIds(userId)).length, [userId]);
-  const exams = useLiveQuery(() => db.exams.filter((e) => e.published && e.mode === 'practice').toArray());
-  const sessions = useLiveQuery(() => db.practiceSessions.where('userId').equals(userId).reverse().sortBy('finishedAt'), [userId]);
-  const saved = useLiveQuery(() => db.savedPractices.where('userId').equals(userId).reverse().sortBy('savedAt'), [userId]);
+  const favoriteCount = useLiveQuery(async () => {
+    const inCourse = await courseQuestionIds(cid);
+    return (await db.favorites.where('userId').equals(userId).toArray()).filter((f) => inCourse.has(f.questionId)).length;
+  }, [userId, cid]);
+  const mistakeCount = useLiveQuery(async () => (await commonMistakeIds(userId, cid)).length, [userId, cid]);
+  const exams = useLiveQuery(() => db.exams.where('courseId').equals(cid).filter((e) => e.published && e.mode === 'practice').toArray(), [cid]);
+  const sessions = useLiveQuery(
+    async () => (await db.practiceSessions.where('userId').equals(userId).reverse().sortBy('finishedAt')).filter((s) => s.courseId === cid),
+    [userId, cid],
+  );
+  const saved = useLiveQuery(
+    async () => (await db.savedPractices.where('userId').equals(userId).reverse().sortBy('savedAt')).filter((s) => s.courseId === cid),
+    [userId, cid],
+  );
   const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
 
   const total = (sets ?? []).reduce((s, x) => s + x.available, 0);

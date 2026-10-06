@@ -7,12 +7,14 @@ import { isCommonMistake, setStats, type QuestionStat, type SetStat } from '../.
 import { EmptyState, PageHeader } from '../../components/PageHeader';
 import { inputClass } from '../../components/fields';
 import { FavoriteButton, useFavoriteIds } from './PracticeRunner';
+import { useCourse } from '../../courses/CourseContext';
 
 const pct = (part: number, whole: number) => (whole ? Math.round((part / whole) * 100) : 0);
 
 /** Practice statistics per questionnaire and per question. Admins can look at everyone or one user. */
 export function StatsView({ onPractice }: { onPractice: (title: string, questionIds: string[]) => void }) {
   const { user } = useAuth();
+  const { courseId } = useCourse();
   const isAdmin = user?.role === 'admin';
   const users = useLiveQuery(() => (isAdmin ? db.users.toArray() : []), [isAdmin]);
   const [scope, setScope] = useState<string>(isAdmin ? 'all' : (user?.id ?? ''));
@@ -21,11 +23,15 @@ export function StatsView({ onPractice }: { onPractice: (title: string, question
 
   const data = useLiveQuery(async () => {
     const [stats, sessions] = await Promise.all([
-      setStats(userId),
-      userId ? db.practiceSessions.where('userId').equals(userId).count() : db.practiceSessions.count(),
+      setStats(userId, courseId ?? ''),
+      db.practiceSessions
+        .where('courseId')
+        .equals(courseId ?? '')
+        .filter((s) => !userId || s.userId === userId)
+        .count(),
     ]);
     return { ...stats, sessions };
-  }, [userId]);
+  }, [userId, courseId]);
   const [open, setOpen] = useState<string | null>(null);
 
   const all = data ? [...data.byQuestion.values()] : [];

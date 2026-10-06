@@ -10,6 +10,7 @@ import { addFilesToUpload, type FileRole, type UploadResult } from '../../../ing
 import { compressImage } from '../../../ingest/images';
 import { normalizeSetName } from '../../../services/questionSets';
 import { QuestionEditor } from './QuestionEditor';
+import { useCourse } from '../../../courses/CourseContext';
 
 export const UPLOAD_ACCEPT = '.pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/*';
 
@@ -38,10 +39,12 @@ export function UploadReviewDialog({
   onClose: () => void;
 }) {
   const { user } = useAuth();
+  const { courseId } = useCourse();
   const [upload, setUpload] = useState<UploadResult | null>(initial);
   const [setName, setSetName] = useState('');
   const [suggestion, setSuggestion] = useState<{ name: string; questions: number } | null>(null);
-  const existingNames = useLiveQuery(async () => (await db.questionSets.toArray()).map((s) => s.name)) ?? [];
+  const existingNames =
+    useLiveQuery(async () => (await db.questionSets.where('courseId').equals(courseId ?? '').toArray()).map((s) => s.name), [courseId]) ?? [];
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +58,7 @@ export function UploadReviewDialog({
     // Pictures uploaded on their own belong with the questions that reference them.
     if (!initial || fixedSetName) return;
     let cancelled = false;
-    void suggestSetForMedia(initial).then((found) => {
+    void suggestSetForMedia(initial, courseId ?? '').then((found) => {
       if (cancelled || !found) return;
       setSuggestion(found);
       setSetName(found.name);
@@ -63,7 +66,7 @@ export function UploadReviewDialog({
     return () => {
       cancelled = true;
     };
-  }, [initial, fixedSetName]);
+  }, [initial, fixedSetName, courseId]);
 
   const appending = existingNames.includes(normalizeSetName(setName));
 
@@ -75,11 +78,11 @@ export function UploadReviewDialog({
       return;
     }
     let cancelled = false;
-    void previewCrossLinks(setName, upload).then((n) => !cancelled && setCrossLinkCount(n));
+    void previewCrossLinks(setName, courseId ?? '', upload).then((n) => !cancelled && setCrossLinkCount(n));
     return () => {
       cancelled = true;
     };
-  }, [upload, setName, appending]);
+  }, [upload, setName, appending, courseId]);
 
   const items = upload?.items ?? [];
   const unanswered = items.filter((i) => i.draft.correctIndex === null).length;
@@ -108,7 +111,7 @@ export function UploadReviewDialog({
   };
 
   const save = async () => {
-    if (!upload || !user) return;
+    if (!upload || !user || !courseId) return;
     if (!normalizeSetName(setName)) {
       setError('יש לתת שם לשאלון.');
       return;
@@ -120,7 +123,7 @@ export function UploadReviewDialog({
     }
     setBusy(true);
     try {
-      await saveUpload(upload, setName, user.id);
+      await saveUpload(upload, setName, courseId, user.id);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'השמירה נכשלה.');

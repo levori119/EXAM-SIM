@@ -10,9 +10,9 @@ export interface SetSummary extends QuestionSet {
 
 export const normalizeSetName = (name: string) => name.trim().replace(/\s+/g, ' ');
 
-export async function listSetSummaries(): Promise<SetSummary[]> {
+export async function listSetSummaries(courseId: string): Promise<SetSummary[]> {
   const [sets, questions, documents, media] = await Promise.all([
-    db.questionSets.toArray(),
+    db.questionSets.where('courseId').equals(courseId).toArray(),
     db.questions.toArray(),
     db.documents.toArray(),
     db.media.toArray(),
@@ -31,27 +31,29 @@ export async function listSetSummaries(): Promise<SetSummary[]> {
     .sort((a, b) => a.name.localeCompare(b.name, 'he'));
 }
 
-export async function findSetByName(name: string): Promise<QuestionSet | undefined> {
-  return db.questionSets.where('name').equals(normalizeSetName(name)).first();
+/** Questionnaire names are unique within a course. */
+export async function findSetByName(name: string, courseId: string): Promise<QuestionSet | undefined> {
+  return db.questionSets.where('[courseId+name]').equals([courseId, normalizeSetName(name)]).first();
 }
 
 /** Returns the questionnaire with this name, creating it if needed. */
-export async function findOrCreateSet(name: string, userId: string): Promise<string> {
+export async function findOrCreateSet(name: string, courseId: string, userId: string): Promise<string> {
   const clean = normalizeSetName(name);
   if (!clean) throw new Error('יש לתת שם לשאלון.');
-  const existing = await findSetByName(clean);
+  const existing = await findSetByName(clean, courseId);
   if (existing) return existing.id;
   const now = Date.now();
   const id = crypto.randomUUID();
-  await db.questionSets.add({ id, name: clean, createdBy: userId, createdAt: now, updatedAt: now, pendingSync: 1 });
+  await db.questionSets.add({ id, courseId, name: clean, createdBy: userId, createdAt: now, updatedAt: now, pendingSync: 1 });
   return id;
 }
 
 export async function renameSet(id: string, name: string): Promise<void> {
   const clean = normalizeSetName(name);
   if (!clean) throw new Error('יש לתת שם לשאלון.');
-  const clash = await findSetByName(clean);
-  if (clash && clash.id !== id) throw new Error('כבר קיים שאלון בשם הזה.');
+  const set = await db.questionSets.get(id);
+  const clash = set && (await findSetByName(clean, set.courseId));
+  if (clash && clash.id !== id) throw new Error('כבר קיים שאלון בשם הזה בקורס.');
   await db.questionSets.update(id, { name: clean, updatedAt: Date.now(), pendingSync: 1 });
 }
 

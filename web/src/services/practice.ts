@@ -1,6 +1,6 @@
 import { db, type PracticeSettings, type Question, type SetQuota } from '../db/db';
 import { pickQuestions } from './composition';
-import { commonMistakeIds } from './stats';
+import { commonMistakeIds, courseQuestionIds } from './stats';
 
 export type PracticeSource =
   | { kind: 'mix'; quotas: SetQuota[] }
@@ -39,16 +39,17 @@ export function shuffle<T>(items: readonly T[]): T[] {
 const answerable = (q: Question | undefined): q is Question => !!q && q.correctIndex !== null && q.options.length >= 2;
 
 /** All answerable questions for a source (before count limits and shuffling). */
-export async function loadSourceQuestions(source: PracticeSource, userId: string): Promise<Question[]> {
+export async function loadSourceQuestions(source: PracticeSource, userId: string, courseId: string): Promise<Question[]> {
   switch (source.kind) {
     case 'mix':
       return pickQuestions(source.quotas);
     case 'favorites': {
       const favs = await db.favorites.where('userId').equals(userId).sortBy('createdAt');
-      return (await db.questions.bulkGet(favs.map((f) => f.questionId))).filter(answerable);
+      const inCourse = await courseQuestionIds(courseId);
+      return (await db.questions.bulkGet(favs.map((f) => f.questionId).filter((id) => inCourse.has(id)))).filter(answerable);
     }
     case 'mistakes':
-      return (await db.questions.bulkGet(await commonMistakeIds(userId))).filter(answerable);
+      return (await db.questions.bulkGet(await commonMistakeIds(userId, courseId))).filter(answerable);
     case 'exam': {
       const exam = await db.exams.get(source.examId);
       return exam ? pickQuestions(exam.composition) : [];
@@ -92,10 +93,11 @@ export function scoreRound(round: PracticeRound, answers: Answers, questions: Ma
   return { correct, total: round.items.length, wrongIds };
 }
 
-export async function savePracticeSession(userId: string, round: PracticeRound, answers: Answers, correctCount: number) {
+export async function savePracticeSession(userId: string, courseId: string, round: PracticeRound, answers: Answers, correctCount: number) {
   await db.practiceSessions.add({
     id: crypto.randomUUID(),
     userId,
+    courseId,
     title: round.title,
     settings: round.settings,
     questionIds: round.items.map((i) => i.questionId),
@@ -116,6 +118,7 @@ export const defaultSavedName = (round: PracticeRound) => `${round.title} ${save
 export async function savePracticeProgress(
   id: string | null,
   userId: string,
+  courseId: string,
   name: string,
   round: PracticeRound,
   answers: Answers,
@@ -125,6 +128,7 @@ export async function savePracticeProgress(
   await db.savedPractices.put({
     id: savedId,
     userId,
+    courseId,
     name: name.trim() || defaultSavedName(round),
     round: { title: round.title, settings: round.settings, items: round.items, startedAt: round.startedAt },
     answers,

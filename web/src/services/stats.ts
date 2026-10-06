@@ -55,12 +55,19 @@ export async function questionStats(userId: string | null): Promise<Map<string, 
   return stats;
 }
 
-export async function setStats(userId: string | null): Promise<{ sets: SetStat[]; byQuestion: Map<string, QuestionStat>; questions: Question[] }> {
-  const [byQuestion, sets, questions] = await Promise.all([
+export async function setStats(
+  userId: string | null,
+  courseId: string,
+): Promise<{ sets: SetStat[]; byQuestion: Map<string, QuestionStat>; questions: Question[] }> {
+  const [allStats, sets, allQuestions] = await Promise.all([
     questionStats(userId),
-    db.questionSets.toArray(),
+    db.questionSets.where('courseId').equals(courseId).toArray(),
     db.questions.toArray(),
   ]);
+  // Only this course's questions count.
+  const setIds = new Set(sets.map((s) => s.id));
+  const questions = allQuestions.filter((q) => setIds.has(q.setId));
+  const byQuestion = new Map([...allStats].filter(([qid]) => questions.some((q) => q.id === qid)));
   const result = sets
     .map((set) => {
       const qs = questions.filter((q) => q.setId === set.id && q.correctIndex !== null);
@@ -80,9 +87,17 @@ export async function setStats(userId: string | null): Promise<{ sets: SetStat[]
   return { sets: result, byQuestion, questions };
 }
 
-/** The user's common mistakes, most-missed first. */
-export async function commonMistakeIds(userId: string): Promise<string[]> {
+/** Ids of the questions belonging to a course. */
+export async function courseQuestionIds(courseId: string): Promise<Set<string>> {
+  const setIds = await db.questionSets.where('courseId').equals(courseId).primaryKeys();
+  return new Set(await db.questions.where('setId').anyOf(setIds).primaryKeys());
+}
+
+/** The user's common mistakes in a course, most-missed first. */
+export async function commonMistakeIds(userId: string, courseId: string): Promise<string[]> {
+  const inCourse = await courseQuestionIds(courseId);
   return [...(await questionStats(userId)).values()]
+    .filter((s) => inCourse.has(s.questionId))
     .filter(isCommonMistake)
     .sort((a, b) => b.wrong - a.wrong || b.wrong / b.attempts - a.wrong / a.attempts)
     .map((s) => s.questionId);

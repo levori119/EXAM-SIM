@@ -1,27 +1,33 @@
 import type { ComponentType } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { AlertTriangle, ClipboardList, FileQuestion, FileUp, UserPlus, Users } from 'lucide-react';
+import { AlertTriangle, ClipboardList, FileQuestion, FileUp, Library, UserPlus, Users } from 'lucide-react';
+import { useCourse } from '../../courses/CourseContext';
 import { db } from '../../db/db';
 import { PageHeader } from '../../components/PageHeader';
 import type { AdminSection } from './AdminLayout';
 
 export function AdminOverview({ onNavigate }: { onNavigate: (s: AdminSection) => void }) {
+  const { courseId, course } = useCourse();
   const stats = useLiveQuery(async () => {
-    const [questions, unanswered, exams, published, users] = await Promise.all([
-      db.questions.count(),
-      db.questions.filter((q) => q.correctIndex === null).count(),
-      db.exams.count(),
-      db.exams.filter((e) => e.published).count(),
+    const cid = courseId ?? '';
+    const setIds = await db.questionSets.where('courseId').equals(cid).primaryKeys();
+    const courseQuestions = db.questions.where('setId').anyOf(setIds);
+    const [questions, unanswered, exams, published, materials, users] = await Promise.all([
+      courseQuestions.count(),
+      db.questions.where('setId').anyOf(setIds).filter((q) => q.correctIndex === null).count(),
+      db.exams.where('courseId').equals(cid).count(),
+      db.exams.where('courseId').equals(cid).filter((e) => e.published).count(),
+      db.materials.where('courseId').equals(cid).count(),
       db.users.count(),
     ]);
-    return { questions, unanswered, exams, published, users };
-  });
+    return { questions, unanswered, exams, published, materials, users };
+  }, [courseId]);
 
   return (
     <>
-      <PageHeader title="לוח ניהול" subtitle="ניהול בנק השאלות, המבחנים והמשתמשים במערכת" />
+      <PageHeader title={course ? course.name : 'לוח ניהול'} subtitle={course?.description || 'שאלונים, מבחנים וחומרי לימוד של הקורס'} />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard icon={FileQuestion} label="שאלות בבנק" value={stats?.questions} onClick={() => onNavigate('questions')} />
         <StatCard
           icon={ClipboardList}
@@ -30,6 +36,7 @@ export function AdminOverview({ onNavigate }: { onNavigate: (s: AdminSection) =>
           detail={stats && `${stats.published} מפורסמים`}
           onClick={() => onNavigate('exams')}
         />
+        <StatCard icon={Library} label="חומרי לימוד" value={stats?.materials} onClick={() => onNavigate('materials')} />
         <StatCard icon={Users} label="משתמשים" value={stats?.users} onClick={() => onNavigate('users')} />
       </div>
 

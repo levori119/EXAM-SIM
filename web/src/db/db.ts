@@ -21,8 +21,43 @@ export interface LocalUser {
  * A named questionnaire: the questions, answer key and figures uploaded together.
  * It is the unit admins mix when building exams and practice rounds.
  */
+/** The top-level container: a course holds questionnaires, exams, practice and study materials. */
+export interface Course {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  pendingSync: 0 | 1;
+}
+
+export type MaterialKind = 'html' | 'pdf' | 'docx' | 'image' | 'video' | 'audio' | 'text' | 'link' | 'file';
+
+/** Study material that isn't a test: interactive HTML, PDF, Word, media, links, any file. */
+export interface Material {
+  id: string;
+  courseId: string;
+  title: string;
+  description: string;
+  kind: MaterialKind;
+  fileName: string | null;
+  mimeType: string;
+  size: number;
+  blob: Blob | null;
+  /** For links. */
+  url: string | null;
+  order: number;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  pendingSync: 0 | 1;
+}
+
 export interface QuestionSet {
   id: string;
+  courseId: string;
   name: string;
   createdBy: string;
   createdAt: number;
@@ -92,6 +127,7 @@ export interface PracticeSettings {
 export interface PracticeSession {
   id: string;
   userId: string;
+  courseId?: string;
   title: string;
   settings: PracticeSettings;
   questionIds: string[];
@@ -107,6 +143,7 @@ export interface PracticeSession {
 export interface SavedPractice {
   id: string;
   userId: string;
+  courseId?: string;
   name: string;
   round: {
     title: string;
@@ -132,6 +169,7 @@ export interface SetQuota {
 
 export interface Exam {
   id: string;
+  courseId: string;
   title: string;
   description: string;
   mode: ExamMode;
@@ -152,6 +190,8 @@ export interface Exam {
 
 export const db = new Dexie('exam-sim') as Dexie & {
   users: EntityTable<LocalUser, 'id'>;
+  courses: EntityTable<Course, 'id'>;
+  materials: EntityTable<Material, 'id'>;
   questionSets: EntityTable<QuestionSet, 'id'>;
   documents: EntityTable<SourceDocument, 'id'>;
   questions: EntityTable<Question, 'id'>;
@@ -247,3 +287,43 @@ db.version(4)
 db.version(5).stores({
   savedPractices: 'id, userId, savedAt',
 });
+
+export const COURSE_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#14b8a6', '#ef4444'];
+
+/**
+ * v6: courses become the parent of questionnaires, exams and practice; study materials arrive.
+ * Existing content moves into a default course. Questionnaire names are unique per course.
+ */
+db.version(6)
+  .stores({
+    courses: 'id, &name, createdAt',
+    materials: 'id, courseId, order',
+    questionSets: 'id, courseId, &[courseId+name], createdAt',
+    exams: 'id, courseId, published, createdAt, pendingSync',
+    practiceSessions: 'id, userId, courseId, finishedAt, pendingSync',
+    savedPractices: 'id, userId, courseId, savedAt',
+  })
+  .upgrade(async (tx) => {
+    const hasContent = (await tx.table('questionSets').count()) > 0 || (await tx.table('exams').count()) > 0;
+    if (!hasContent) return;
+    const now = Date.now();
+    const courseId = crypto.randomUUID();
+    await tx.table('courses').add({
+      id: courseId,
+      name: 'קורס כללי',
+      description: '',
+      color: COURSE_COLORS[0],
+      createdBy: '',
+      createdAt: now,
+      updatedAt: now,
+      pendingSync: 1,
+    });
+    for (const table of ['questionSets', 'exams', 'practiceSessions', 'savedPractices']) {
+      await tx
+        .table(table)
+        .toCollection()
+        .modify((row: { courseId?: string }) => {
+          row.courseId ??= courseId;
+        });
+    }
+  });

@@ -3,9 +3,12 @@ import { useAuth } from '../../auth/AuthContext';
 import { Avatar } from '../../components/Avatar';
 import { OnlineBadge } from '../../components/OnlineBadge';
 import { PracticeArea } from './PracticeArea';
+import { CourseSwitcher } from '../../courses/CourseSwitcher';
+import { useCourse } from '../../courses/CourseContext';
 
 export function ExamineeLayout() {
   const { user, logout } = useAuth();
+  const { courses } = useCourse();
   if (!user) return null;
   return (
     <div className="min-h-screen">
@@ -16,7 +19,12 @@ export function ExamineeLayout() {
               <GraduationCap className="h-6 w-6" />
             </div>
             <Avatar name={user.displayName} color={user.avatarColor} size="sm" />
-            <span className="font-semibold">{user.displayName}</span>
+            <span className="hidden font-semibold sm:inline">{user.displayName}</span>
+            {(courses?.length ?? 0) > 1 && (
+              <div className="w-44 sm:w-60">
+                <CourseSwitcher compact />
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <OnlineBadge />
